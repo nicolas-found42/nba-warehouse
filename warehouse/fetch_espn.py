@@ -59,8 +59,13 @@ def gap_games() -> list[tuple]:
 def main() -> None:
     games = gap_games()
     print(len(games), 'gap games on', len({g[1] for g in games}), 'dates', flush=True)
+    import datetime as dt
+    days = {g[1] for g in games}
+    for d in list(days):  # ESPN can list a late game under the next or previous day
+        base = dt.datetime.strptime(d, '%Y%m%d')
+        days |= {(base + dt.timedelta(days=k)).strftime('%Y%m%d') for k in (-1, 1)}
     events: dict[str, list[tuple]] = {}
-    for d in sorted({g[1] for g in games}):
+    for d in sorted(days):
         sb = get(f'{BASE}/scoreboard?dates={d}&limit=200', CACHE / 'scoreboard' / f'{d}.json')
         out = []
         for e in sb.get('events') or []:
@@ -69,13 +74,22 @@ def main() -> None:
             if 'home' in sc and 'away' in sc:
                 out.append((e['id'], sc['home'], sc['away']))
         events[d] = out
-    matches = {}
+    import duckdb
+    c = duckdb.connect(str(DEFAULT_OUT), read_only=True)
+    all_scores = set(c.execute('''SELECT strftime(g.game_date, '%Y%m%d'), r.home_score, r.away_score FROM core.dim_game g
+        JOIN core.fact_game_result r USING (game_id) WHERE g.game_date >= '2001-09-01' ''').fetchall())
+    c.close()
+    old = CACHE / 'matches.json'
+    matches = json.loads(old.read_text()) if old.exists() else {}  # earlier matches are kept (their games may be filled now)
     for gid, d, hs, aws in games:
         hit = [e for e, h, a in events.get(d, []) if (h, a) == (hs, aws)]
+        if not hit:  # ESPN may list the game a day early or late: allowed only when no warehouse game that day has these scores
+            near = [(dt.datetime.strptime(d, '%Y%m%d') + dt.timedelta(days=k)).strftime('%Y%m%d') for k in (-1, 1)]
+            hit = [e for n in near for e, h, a in events.get(n, []) if (h, a) == (hs, aws) and (n, h, a) not in all_scores]
         same = [g for g in games if g[1] == d and (g[2], g[3]) == (hs, aws)]
         if len(hit) == 1 and len(same) == 1:
             matches[gid] = hit[0]
-    print(len(matches), 'of', len(games), 'games matched to an ESPN event', flush=True)
+    print(sum(g[0] in matches for g in games), 'of', len(games), 'gap games matched to an ESPN event;', len(matches), 'matches in all', flush=True)
     (CACHE / 'matches.json').write_text(json.dumps(matches, indent=0, sort_keys=True))
     for i, (gid, eid) in enumerate(sorted(matches.items())):
         get(f'{BASE}/summary?event={eid}', CACHE / 'summary' / f'{eid}.json')
