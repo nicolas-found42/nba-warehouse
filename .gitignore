@@ -1,0 +1,13 @@
+# Databases, downloads and evidence stay local (size and source terms)
+data/
+*.duckdb
+*.duckdb.wal
+# Third-party reference project (MIT, upstream: github.com/wyattowalsh/nbadb)
+reference/
+# Tooling
+__pycache__/
+.mypy_cache/
+.venv/
+.DS_Store
+.env
+*.log

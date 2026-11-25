@@ -1,0 +1,5 @@
+espn_game_id,game_id,game_date,home_id,away_id,home_score,away_score,home_periods,away_periods,official_url,gamebook_url
+401910019,0022600270,2026-11-19,1610612763,1610612744,126,98,31|24|37|34,24|23|26|25,https://www.nba.com/game/gsw-vs-mem-0022600270/box-score,https://statsdmz.nba.com/pdfs/20261119/20261119_GSWMEM.pdf
+401910020,0022600271,2026-11-19,1610612749,1610612757,114,124,21|37|34|22,24|36|36|28,https://www.nba.com/game/por-vs-mil-0022600271/box-score,https://statsdmz.nba.com/pdfs/20261119/20261119_PORMIL.pdf
+401910021,0022600272,2026-11-19,1610612750,1610612752,99,102,26|24|28|21,33|32|25|12,https://www.nba.com/game/nyk-vs-min-0022600272/box-score,https://statsdmz.nba.com/pdfs/20261119/20261119_NYKMIN.pdf
+401910022,0022600273,2026-11-19,1610612759,1610612746,124,112,24|33|35|32,21|33|34|24,https://www.nba.com/game/lac-vs-sas-0022600273/box-score,https://statsdmz.nba.com/pdfs/20261119/20261119_LACSAS.pdf

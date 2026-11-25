@@ -1,0 +1,9 @@
+espn_game_id,game_id,game_date,home_id,away_id,home_score,away_score,source_url,exception_reason
+401909856,0022600107,2026-10-24,1610612737,1610612745,114,121,https://www.nba.com/games?date=2026-10-24,extra_wrong_editorial_id_assignment
+401909860,0022600111,2026-10-24,1610612756,1610612744,131,122,https://www.nba.com/games?date=2026-10-24,wrong_editorial_id_on_home_and_missing_id_on_away
+401909896,0022600147,2026-10-31,1610612762,1610612757,90,112,https://www.nba.com/games?date=2026-10-31,conflicting_editorial_score
+401909934,0022600185,2026-11-04,1610612758,1610612747,103,116,https://www.nba.com/games?date=2026-11-04,conflicting_editorial_score
+401909301,0022600039,2026-11-13,1610612745,1610612762,125,118,https://www.nba.com/news/emirates-nba-cup-key-dates-schedule,conflicting_editorial_home_designation
+401909987,0022600238,2026-11-15,1610612746,1610612766,113,105,https://www.nba.com/game/cha-vs-lac-0022600238/box-score,conflicting_editorial_score
+401909993,0022600244,2026-11-15,1610612758,1610612760,103,125,https://www.nba.com/games?date=2026-11-15,conflicting_editorial_home_designation
+401910011,0022600262,2026-11-18,1610612751,1610612741,107,137,https://www.nba.com/games?date=2026-11-18,missing_provider_crosswalk

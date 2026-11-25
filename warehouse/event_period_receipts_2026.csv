@@ -1,0 +1,8 @@
+game_id,game_date,home_id,away_id,component,stage,fixture_number,regulation_seconds,regulation_target,overtime_target,home_periods,away_periods,evidence_kind,source_url,rules_url
+0032500004,2026-02-13,1610616862,1610616865,rising_stars,semifinal,1,,40,,40,34,scorer_report,https://statsdmz.nba.com/pdfs/20260213/20260213_AUSMEL.pdf,https://www.nba.com/news/2026-nba-rising-stars
+0032500005,2026-02-13,1610616864,1610616863,rising_stars,semifinal,2,,40,,36,41,scorer_report,https://statsdmz.nba.com/pdfs/20260213/20260213_VINTMC.pdf,https://www.nba.com/news/2026-nba-rising-stars
+0032500006,2026-02-13,1610616862,1610616863,rising_stars,final,3,,25,,24,25,scorer_report,https://statsdmz.nba.com/pdfs/20260213/20260213_VINMEL.pdf,https://www.nba.com/news/2026-nba-rising-stars
+0032500011,2026-02-15,1610616859,1610616861,all_star,round_robin,1,720,,5,32|5,32|3,scorer_report,https://statsdmz.nba.com/pdfs/20260215/20260215_WLDSTR.pdf,https://cdn.nba.com/manage/2026/02/2026-NBA-All-Star-Game-Rules.pdf
+0032500021,2026-02-15,1610616860,1610616859,all_star,round_robin,2,720,,5,42,40,keyed_official_box_and_pbp,https://www.nba.com/game/0032500021/box-score,https://cdn.nba.com/manage/2026/02/2026-NBA-All-Star-Game-Rules.pdf
+0032500031,2026-02-15,1610616860,1610616861,all_star,round_robin,3,720,,5,48,45,scorer_report,https://statsdmz.nba.com/pdfs/20260215/20260215_WLDSTP.pdf,https://cdn.nba.com/manage/2026/02/2026-NBA-All-Star-Game-Rules.pdf
+0032500041,2026-02-15,1610616860,1610616859,all_star,final,4,720,,5,21,47,scorer_report,https://statsdmz.nba.com/pdfs/20260215/20260215_STRSTP.pdf,https://cdn.nba.com/manage/2026/02/2026-NBA-All-Star-Game-Rules.pdf

@@ -1,0 +1,5 @@
+game_id,source_path,expected_home,expected_away
+0025100035,/boxscores/195111150SYR.html,SYR,BOS
+0025100052,/boxscores/195111220BOS.html,BOS,MLH
+0025600127,/boxscores/195701040BOS.html,SYR,BOS
+0024600169,/boxscores/194701200PIT.html,PIT,DTF
