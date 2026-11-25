@@ -198,7 +198,22 @@ DOMAINS: list[Domain] = [
                     FROM core.dim_official GROUP BY 1 HAVING count(*) = 1) o ON o.name = lower(g.name)
               WHERE g.game_id NOT IN (SELECT game_id FROM raw.officials)
                 AND g.game_id NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
-                                      AND official_id IS NOT NULL AND game_id IS NOT NULL)''',
+                                      AND official_id IS NOT NULL AND game_id IS NOT NULL)
+              UNION ALL  -- ESPN 1996-2002 crews (sportsdataverse release, load_espn_officials.py), only for games no source above has
+              SELECT DISTINCT e.game_id, o.official_id, o.jersey_num, 'espn_sdv'
+              FROM raw.espn_sdv_game_official e
+              JOIN (SELECT name, any_value(official_id) AS official_id, any_value(jersey_num) AS jersey_num
+                    FROM (SELECT DISTINCT lower(first_name || ' ' || last_name) AS name, official_id, jersey_num FROM core.dim_official
+                          UNION  -- ESPN spellings already resolved to NBA referee ids (e.g. 'Eddie F. Rush', 'Dee Kantner')
+                          SELECT DISTINCT lower(b.espn_official_full_name), b.official_id, d.jersey_num FROM raw.bridge_official_espn b
+                          JOIN core.dim_official d USING (official_id) WHERE NOT b.is_ambiguous AND NOT b.is_unresolved)
+                    GROUP BY 1 HAVING count(DISTINCT official_id) = 1) o ON o.name = lower(trim(e.official_full_name))
+              WHERE e.game_id IS NOT NULL
+                AND e.game_id NOT IN (SELECT game_id FROM raw.officials)
+                AND e.game_id NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
+                                      AND official_id IS NOT NULL AND game_id IS NOT NULL)
+                AND e.game_id NOT IN (SELECT lpad(gameId, 10, '0') FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__games
+                                      WHERE nullif(trim(officials), '') IS NOT NULL)''',
            key=['game_id', 'official_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'official_id': 'core.dim_official(official_id)'},
            not_null=['game_id', 'official_id']),
