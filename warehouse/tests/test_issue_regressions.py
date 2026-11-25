@@ -257,3 +257,29 @@ def test_odds_cutoffs_closing_conflicts_and_price_conversion():
         assert c.execute("""SELECT decimal_home_or_over,hour(tipoff_at AT TIME ZONE 'UTC')
             FROM betting.odds_at('game',?::TIMESTAMPTZ)""", [f'2026-11-24 {cutoff}Z']).fetchall() == [(price, tip_hour)]
     assert c.execute('SELECT source, round(clv_home_or_over, 3) FROM betting.closing_line_value').fetchall() == [('a', 0.2)]
+
+
+def test_kaggle_fixture_timestamps_stay_utc_after_type_inference():
+    from betting_kaggle import ODDS_HISTORY, build_kaggle
+
+    with duckdb.connect() as c:
+        c.execute("""SET TimeZone='America/New_York'; CREATE SCHEMA raw_kaggle; CREATE SCHEMA core; CREATE SCHEMA betting;
+            CREATE TEMP TABLE team_name(name, team_id, valid_from, valid_to) AS
+                SELECT * FROM (VALUES ('home team',1,2010,2029), ('away team',2,2010,2029));
+            CREATE TABLE core.dim_game(game_id,game_date,season_start,home_team_id,away_team_id) AS
+                SELECT '0022400001',DATE '2025-01-04',2024,1,2;
+            CREATE TABLE core.fact_game_result(game_id,home_score,away_score) AS SELECT '0022400001',108,94;""")
+        c.execute(f'''CREATE TABLE raw_kaggle.{ODDS_HISTORY}matches_2 AS
+            SELECT 42 AS match_id,'National Basketball Association' AS competition,TIMESTAMP '2025-01-05 04:00:00' AS tipoff_utc,
+                   'Home Team' AS home_team,'Away Team' AS away_team,108 AS home_score,94 AS away_score;
+            CREATE TABLE raw_kaggle.{ODDS_HISTORY}matches AS
+            SELECT * REPLACE ('2025-01-05T06:00:00+0200' AS tipoff_utc) FROM raw_kaggle.{ODDS_HISTORY}matches_2;
+            CREATE TABLE raw_kaggle.{ODDS_HISTORY}odds_moneyline_2 AS
+            SELECT 42 AS match_id,'book' AS bookmaker,TIMESTAMP '2025-01-04 20:00:00' AS quote_time_utc,
+                   'prematch' AS phase,1.5 AS home_odds,2.5 AS away_odds;
+            CREATE TABLE raw_kaggle.{ODDS_HISTORY}odds_moneyline AS
+            SELECT * REPLACE ('2025-01-04T22:00:00+02' AS quote_time_utc) FROM raw_kaggle.{ODDS_HISTORY}odds_moneyline_2;''')
+        build_kaggle(c)
+        assert c.execute('''SELECT match_status,game_id,observed_at=TIMESTAMPTZ '2025-01-04 20:00:00+00'
+            FROM betting.kaggle_odds''').fetchall() == [('matched', '0022400001', True)] * 2
+        assert c.execute("SELECT kaggle_utc_time(TIMESTAMPTZ '2025-01-05 06:00:00+02') = TIMESTAMPTZ '2025-01-05 04:00:00+00'").fetchone() == (True,)

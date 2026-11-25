@@ -10,6 +10,12 @@ PINNACLE = 'minmaxer_pinnacle_closing_lines_nba_nhl__pinnacle_closing_lines_nba_
 
 
 def build_kaggle(c) -> None:
+    c.execute(r'''CREATE OR REPLACE TEMP MACRO kaggle_utc_time(source_time) AS (
+        CASE WHEN typeof(source_time) = 'TIMESTAMP WITH TIME ZONE'
+               OR regexp_matches(trim(source_time::VARCHAR), '[ T][0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)? ?([zZ]|[+-][0-9]{2}(:?[0-9]{2})?)$')
+             THEN try_cast(source_time AS TIMESTAMPTZ)
+             ELSE try_cast(source_time AS TIMESTAMP) AT TIME ZONE 'UTC' END
+    )''')
     c.execute('''CREATE OR REPLACE TABLE betting.kaggle_odds (
         source_table VARCHAR, source_fixture VARCHAR, game_id VARCHAR, match_status VARCHAR, book VARCHAR,
         market VARCHAR, handicap DOUBLE, home_or_over_price DOUBLE, away_or_under_price DOUBLE,
@@ -49,14 +55,15 @@ def build_kaggle(c) -> None:
             continue
         c.execute(f'''CREATE OR REPLACE TEMP TABLE kaggle_fixture AS
             WITH matches AS (
-                SELECT DISTINCT match_id::VARCHAR AS match_id, tipoff_utc, home_team, away_team, home_score, away_score
+                SELECT DISTINCT match_id::VARCHAR AS match_id, home_team, away_team, home_score, away_score,
+                    kaggle_utc_time(tipoff_utc) AS tipoff_at
                 FROM raw_kaggle.{q(fixtures)} WHERE competition = 'National Basketball Association'
             ), candidates AS (
                 SELECT DISTINCT m.match_id, g.game_id FROM matches m
                 JOIN team_name home ON home.name = lower(trim(m.home_team))
                 JOIN team_name away ON away.name = lower(trim(m.away_team))
                 JOIN core.dim_game g ON g.home_team_id = home.team_id AND g.away_team_id = away.team_id
-                    AND g.game_date = (try_cast(m.tipoff_utc AS TIMESTAMPTZ) AT TIME ZONE 'America/New_York')::DATE
+                    AND g.game_date = (m.tipoff_at AT TIME ZONE 'America/New_York')::DATE
                     AND g.season_start + 1 BETWEEN home.valid_from AND home.valid_to + 1
                     AND g.season_start + 1 BETWEEN away.valid_from AND away.valid_to + 1
                 JOIN core.fact_game_result r ON r.game_id = g.game_id
@@ -76,7 +83,7 @@ def build_kaggle(c) -> None:
             c.execute(f'''INSERT INTO betting.kaggle_odds
                 SELECT ?, s.match_id::VARCHAR, f.game_id, coalesce(f.status, 'unmatched'), s.bookmaker, ?, {line},
                        try_cast(s.{first} AS DOUBLE), try_cast(s.{second} AS DOUBLE), 'decimal',
-                       try_cast(s.quote_time_utc AS TIMESTAMP) AT TIME ZONE 'UTC', s.phase, s.quote_time_utc::VARCHAR
+                       kaggle_utc_time(s.quote_time_utc), s.phase, s.quote_time_utc::VARCHAR
                 FROM raw_kaggle.{q(table)} s LEFT JOIN kaggle_fixture f ON f.match_id = s.match_id::VARCHAR''', [table, market])
     if PINNACLE in available:
         load_pinnacle(c)

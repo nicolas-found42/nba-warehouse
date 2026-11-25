@@ -395,3 +395,7 @@ access restrictions establish only that the requested route could not be checked
   [Publisher dictionary](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/csv/nba/data_dictionary.csv#L364-L401)
   [Publisher dashboard](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/projects/db-viz/pages/09_Odds_and_Betting.py#L61-L98)
   [Sample Pinnacle event](https://www.pinnacle.com/en/basketball/nba/usa-stars-vs-usa-stripes/1624285681/)
+- The two Kaggle NBA sample exports encode the same UTC fixture and quote times as text and typed timestamps.
+  Interpreting both fixture fields as UTC before converting to the NBA game date restored 1,700,111 fixture links in
+  the typed export. Both copies now link their moneyline, spread and totals rows to the same 1,171 fixtures. The raw
+  price and quote-time columns agree after type normalization.
