@@ -1,5 +1,7 @@
 # Faster sources for the remaining gaps (2026-11-25)
 
+> Remaining work and known problems are tracked in GitHub issues: start with #8 (handoff), then #3-#7.
+
 The goal was to replace per-page fetching with whole-season or bulk files that are free and need no key (Kaggle allowed). Source rank is unchanged: NBA scorer reports > NBA.com > archived nba.com and newspapers > Basketball-Reference > everything else. A lower-ranked source only fills games that no higher source covers. Every bulk match is one-to-one, and every quarter-score line must add up to the official final.
 
 ## Sources adopted
