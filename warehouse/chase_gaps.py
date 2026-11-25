@@ -110,6 +110,9 @@ def finalize(warehouse: Path) -> None:
         load_nba_gaps.pbp(c)
         load_nba_gaps.boxes(c)
         load_nba_gaps.officials(c)
+        import load_espn  # ESPN public API (owner-approved 2026-11-25), lowest rank, fills only games nothing else covers
+        if (load_espn.CACHE / 'matches.json').exists():
+            load_espn.load(c, json.loads((load_espn.CACHE / 'matches.json').read_text()))
         for d in pd.DOMAINS:
             if d.name in ('fact_starting_lineup', 'dim_official', 'fact_game_official'):
                 c.execute('DELETE FROM audit.domain_disposition WHERE domain = ?', [d.name])

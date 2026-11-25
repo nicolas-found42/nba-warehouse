@@ -38,7 +38,7 @@ Final gap ledger (`audit.game_coverage`):
 
 | Domain | Status | Games | What was checked |
 |---|---|---|---|
-| Play-by-play and shot charts | source_unavailable | 635 each | NBA.com `playbyplayv3`, Kaggle eoinamoore. Mostly 2003-2010 preseason. ESPN's API has about 90% of these (not used without approval). |
+| Play-by-play and shot charts | source_unavailable | 635 each (before ESPN) | NBA.com `playbyplayv3`, Kaggle eoinamoore. Mostly 2003-2010 preseason. |
 | Quarter scores | source_unavailable | 357 | Basketball-Reference box pages, nbastats.net. Mostly 1946-50. |
 | Referees | source_unavailable | 66 | NBA box summary v2 and v3, Kaggle eoinamoore. Mostly preseason; ESPN's API has some. |
 | Starting lineups | source_unavailable | 49 | NBA.com `boxscoretraditionalv3`, llimllib, NBA starters |
@@ -58,12 +58,25 @@ No gap remains `missing_recoverable`.
 - Kaggle deocheng has empty quarter and FGA columns before 1990.
 - No bulk file has full referee crews for the 1996-99 games where only 1-2 officials are known. Basketball-Reference box pages are the only source for those.
 
-## Open (needs the owner's decision on ESPN)
+## ESPN public API (owner-approved 2026-11-25)
 
-The ESPN public API (`site.api.espn.com/.../summary?event=<id>`, no key) is the only source found for three gaps:
+The owner approved ESPN's public API (`site.api.espn.com`, no key) as the lowest-ranked source, used only for games no other source covers.
 
-- **Preseason play-by-play and shots, 2003-2013:** about 90-100% of games from 2005 on, and 70-75% for 2003-05. Some coordinates are placeholders at (25, 0).
-- **Preseason referee crews:** many 2004-2010 games still have none.
-- **Preseason player box scores:** 27 of 28 games.
+- `fetch_espn.py` fetches one scoreboard per gap date and matches each gap game to exactly one ESPN event on date plus both final scores (605 of 635 games). It then fetches one summary per matched event. Everything is cached under `evidence/espn-api/`.
+- `load_espn.py` (run by `chase_gaps.py finalize`) loads:
+  - **Play-by-play and shots** only when the log's running score reaches the official final for both teams. 431 games were admitted and 70 inconsistent logs were rejected (logged `mismatch`). In admitted games, made shots equal the box score's field goals made for 85% of team-games, and are within 2 for 93%. ESPN puts the rim at (25, 0) in feet. That point is also its placeholder, so shots there are stored as `ambiguous_zero`, like NBA.com's (0, 0).
+  - **Referees** by name through `OFFICIAL_NAME_CANON`, only for games where no source names anyone. Source `espn_api`, 42 games.
+  - **Starters** only for teams no other source names starters for. ESPN does not flag starters for most 2005-07 preseason games.
+- Players are resolved per game by name against that game's warehouse box score, then through `raw.bridge_player_espn_base`.
+- `audit.espn_api_fill` records which games' plays and shots came from ESPN. `fact_shot` keys hash source `espn_api`.
 
-Each needs one request per game. The scope rule keeps ESPN to cross-checks unless the owner approves it.
+Gap ledger after ESPN:
+
+| Domain | Status | Games |
+|---|---|---|
+| Play-by-play / shot charts | source_unavailable | 204 / 204 |
+| Quarter scores | source_unavailable | 357 |
+| Referees | source_unavailable | 24 |
+| Starting lineups | source_unavailable | 46 |
+| Player box | partial / source_unavailable | 19 / 7 |
+| Team box | partial / source_unavailable | 6 / 6 |

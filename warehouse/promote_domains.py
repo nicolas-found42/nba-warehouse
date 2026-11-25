@@ -160,7 +160,7 @@ DOMAINS: list[Domain] = [
                 'season_year': 'core.dim_season(season_year)'},
            not_null=['person_id', 'team_id', 'season_year']),
     Domain('fact_starting_lineup', 'raw.fact_starting_lineup_player (1996-) + box-score starting positions where no lineup row exists + Kaggle eoinamoore starters for games neither has',
-           '''SELECT game_id, team_id, person_id, starting_position, 'nba_starting_lineup' AS source FROM raw.fact_starting_lineup_player
+           '''WITH hi AS (SELECT game_id, team_id, person_id, starting_position, 'nba_starting_lineup' AS source FROM raw.fact_starting_lineup_player
               UNION ALL
               SELECT game_id, team_id, person_id, starting_position, 'box_score_starting_position' FROM core.fact_player_game_stats
               WHERE nullif(trim(starting_position), '') IS NOT NULL
@@ -181,7 +181,11 @@ DOMAINS: list[Domain] = [
                 AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.fact_starting_lineup_player)
                 AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM core.fact_player_game_stats WHERE nullif(trim(starting_position), '') IS NOT NULL)
                 AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.nba_gap_starter)
-                AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.llimllib_starter)''',
+                AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.llimllib_starter))
+              SELECT * FROM hi
+              UNION ALL  -- ESPN public API starters (load_espn.py, owner-approved), lowest rank: only teams no source above names starters for
+              SELECT game_id, team_id, person_id, NULL, 'espn_api' FROM raw.espn_api_starter
+              WHERE (game_id, team_id) NOT IN (SELECT game_id, team_id FROM hi)''',
            key=['game_id', 'person_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'person_id': 'core.dim_person(person_id)',
                 '(game_id, team_id)': 'core.bridge_game_team(game_id, team_id)'},
@@ -275,6 +279,11 @@ espn_only AS (  -- games whose crew comes only from ESPN, which Basketball-Refer
               SELECT * FROM base WHERE game_id NOT IN (SELECT game_id FROM espn_only WHERE game_id IN (SELECT game_id FROM bb_full))
               UNION ALL  -- a full Basketball-Reference crew replaces an ESPN-only crew
               SELECT * FROM bb WHERE game_id IN (SELECT game_id FROM espn_only) AND game_id IN (SELECT game_id FROM bb_full)
+              UNION ALL  -- ESPN public API crews (load_espn.py, owner-approved), lowest rank: only games no source above names anyone for
+              SELECT DISTINCT e.game_id, o.official_id, o.jersey_num, 'espn_api'
+              FROM raw.espn_api_game_official e
+              JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('e.official_name') + '''
+              WHERE e.game_id NOT IN (SELECT game_id FROM base) AND e.game_id NOT IN (SELECT game_id FROM bb)
               UNION ALL  -- otherwise Basketball-Reference completes crews of fewer than 3, or gives a full crew where no source has one
               SELECT * FROM bb
               WHERE bb.game_id NOT IN (SELECT game_id FROM espn_only)
