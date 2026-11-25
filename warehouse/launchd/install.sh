@@ -25,7 +25,17 @@ launchctl bootstrap "gui/$(id -u)" "$dest"
 echo "installed $dest -> $app (local hours ${hours[*]})"
 # nightly gap chasing at 01:00 local time
 chase="$HOME/Library/LaunchAgents/com.nba-warehouse.chase-gaps.plist"
+# reinstalling stops a running chase; restart it afterwards (it resumes where it left off)
+chase_was_running=$(launchctl list | awk '$3=="com.nba-warehouse.chase-gaps" && $1!="-"' | wc -l | tr -d ' ')
 sed -e "s#__REPO__#$app#g" -e "s/__H1__/1/" "$repo/warehouse/launchd/com.nba-warehouse.chase-gaps.plist.template" > "$chase"
 launchctl bootout "gui/$(id -u)" "$chase" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$chase"
+[ "$chase_was_running" = "1" ] && launchctl kickstart "gui/$(id -u)/com.nba-warehouse.chase-gaps"
 echo "installed $chase (01:00 nightly)"
+# progress page every 5 minutes
+page_plist="$HOME/Library/LaunchAgents/com.nba-warehouse.status-page.plist"
+mkdir -p "$base/data/status"
+sed -e "s#__REPO__#$app#g" "$repo/warehouse/launchd/com.nba-warehouse.status-page.plist.template" > "$page_plist"
+launchctl bootout "gui/$(id -u)" "$page_plist" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$page_plist"
+echo "installed $page_plist (every 5 minutes) -> $base/data/status/index.html"
