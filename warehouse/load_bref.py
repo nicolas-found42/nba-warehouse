@@ -201,6 +201,49 @@ def officials(c: duckdb.DuckDBPyConnection) -> None:
     if out:
         c.executemany('INSERT INTO raw.bref_box_official VALUES (?,?,?,?)', out)
     print('box officials', len(out))
+    official_map(c)
+
+
+# Basketball-Reference referee ids whose names do not resolve to one NBA referee id by exact name. Checked against
+# co-officiated games: 'Ed T. Rush' worked 30 games alongside Eddie F. Rush (1190), so he is a different person.
+BREF_OFFICIAL_ALIAS = {
+    'nunezto99r': 1181,  # 'Tommy Nunez Sr.' (NBA id 1181, #28); 2878 is Tommy Nunez Jr.
+    'caperja98r': 1148,  # 'James Capers Jr.' (NBA id 1148)
+    'corbise99r': 1151,  # 'Sean Corbin' (NBA id 1151, 975 NBA box games); 1962936541 is an upstream duplicate with 5 games
+}
+NEW_OFFICIAL_ID_BASE = 1689000000  # synthetic referee ids for officials with no NBA referee id
+
+
+def official_map(c: duckdb.DuckDBPyConnection) -> None:
+    """raw.bref_official_map: one row per Basketball-Reference referee id -> official_id, rebuilt on every load.
+    how = 'alias' (BREF_OFFICIAL_ALIAS), 'name' (promote_domains.OFFICIAL_NAME_CANON: the NBA id used most for that name),
+    or 'new' (no NBA referee: synthetic id from NEW_OFFICIAL_ID_BASE, added to core.dim_official by promote_domains.py).
+    A referee that already has a synthetic id keeps it while it still has no NBA id."""
+    from promote_domains import OFFICIAL_NAME_CANON
+    c.execute('''CREATE TABLE IF NOT EXISTS raw.bref_official_map (bref_referee_id VARCHAR PRIMARY KEY, official_name VARCHAR,
+        official_id BIGINT, how VARCHAR)''')
+    kept = dict(c.execute("SELECT bref_referee_id, official_id FROM raw.bref_official_map WHERE how = 'new'").fetchall())
+    refs = c.execute('SELECT bref_referee_id, any_value(official_name) FROM raw.bref_box_official GROUP BY 1 ORDER BY 1').fetchall()
+    canon = dict(c.execute(f'SELECT name, official_id FROM {OFFICIAL_NAME_CANON} WHERE official_id NOT BETWEEN ? AND ?',
+                           [NEW_OFFICIAL_ID_BASE, NEW_OFFICIAL_ID_BASE + 999999]).fetchall())
+    nxt = max([NEW_OFFICIAL_ID_BASE, *kept.values()])
+    rows = []
+    for ref, name in refs:
+        key = re.sub('[^a-z]', '', name.lower())
+        if ref in BREF_OFFICIAL_ALIAS:
+            rows.append((ref, name, BREF_OFFICIAL_ALIAS[ref], 'alias'))
+        elif key in canon:
+            rows.append((ref, name, canon[key], 'name'))
+        else:
+            if ref not in kept:
+                nxt += 1
+                kept[ref] = nxt
+            rows.append((ref, name, kept[ref], 'new'))
+    c.execute('DELETE FROM raw.bref_official_map')
+    if rows:
+        c.executemany('INSERT INTO raw.bref_official_map VALUES (?,?,?,?)', rows)
+    print('bref referee map', c.execute('SELECT how, count(*) FROM raw.bref_official_map GROUP BY 1 ORDER BY 1').fetchall(),
+          c.execute("SELECT list(official_name) FROM raw.bref_official_map WHERE how = 'new'").fetchone()[0])
 
 
 if __name__ == '__main__':

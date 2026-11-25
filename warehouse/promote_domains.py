@@ -22,6 +22,25 @@ from pathlib import Path
 from build_warehouse import DEFAULT_OUT, connect, q
 
 
+# One referee per normalized name (lowercase letters only, so "Sha'Rae" = "ShaRae"). Several names carry more than one
+# official_id (NBA box ids plus duplicates from the Kaggle and ESPN sources); the id NBA box scores use most wins, then the
+# id the Kaggle kyleknowles1 assignments use most. Names whose ids are all unused stay ambiguous unless there is only one.
+OFFICIAL_NAME_CANON = """(SELECT name, arg_max(official_id, score) AS official_id, arg_max(jersey_num, score) AS jersey_num FROM (
+    SELECT n.name, n.official_id, d.jersey_num, coalesce(u.nba, 0) * 100000 + coalesce(k.kk, 0) AS score FROM (
+        SELECT DISTINCT regexp_replace(lower(first_name || last_name), '[^a-z]', '', 'g') AS name, official_id FROM core.dim_official
+        UNION SELECT DISTINCT regexp_replace(lower(espn_official_full_name), '[^a-z]', '', 'g'), official_id FROM raw.bridge_official_espn
+              WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL) n
+    LEFT JOIN core.dim_official d USING (official_id)
+    LEFT JOIN (SELECT try_cast(official_id AS BIGINT) AS official_id, count(*) AS nba FROM raw.officials GROUP BY 1) u USING (official_id)
+    LEFT JOIN (SELECT try_cast(c AS BIGINT) AS official_id, count(*) AS kk FROM (SELECT unnest([official1_code, official2_code,
+               official3_code, official4_code]) AS c FROM raw_kaggle.kyleknowles1_nba_referee_assignments) GROUP BY 1) k USING (official_id))
+  GROUP BY 1 HAVING max(score) > 0 OR count(DISTINCT official_id) = 1)"""
+
+
+def norm_name(expr: str) -> str:
+    return f"regexp_replace(lower({expr}), '[^a-z]', '', 'g')"
+
+
 @dataclass
 class Domain:
     name: str                 # core table name
@@ -191,7 +210,10 @@ DOMAINS: list[Domain] = [
                     SELECT try_cast(code AS BIGINT), split_part(name, ' ', 1), trim(substr(name, length(split_part(name, ' ', 1)) + 2)), jnum, 3
                     FROM (SELECT unnest([official1, official2, official3, official4]) AS name, unnest([official1_code, official2_code, official3_code, official4_code]) AS code,
                                  unnest([official1_JNum, official2_JNum, official3_JNum, official4_JNum]) AS jnum FROM raw_kaggle.kyleknowles1_nba_referee_assignments)
-                    WHERE nullif(trim(code), '') IS NOT NULL)
+                    WHERE nullif(trim(code), '') IS NOT NULL
+                    UNION ALL  -- referees on Basketball-Reference box pages with no NBA referee id (synthetic ids, load_bref.official_map)
+                    SELECT official_id, split_part(official_name, ' ', 1), trim(substr(official_name, length(split_part(official_name, ' ', 1)) + 2)), NULL, 4
+                    FROM raw.bref_official_map WHERE how = 'new')
               GROUP BY 1 HAVING bool_or(pref = 1) OR true''',
            key=['official_id'], not_null=['official_id']),
     Domain('fact_game_official', 'raw.officials (NBA box-score officials, 1996-2023); ESPN-resolved officials, then Kaggle eoinamoore names, only for games NBA data lacks',
@@ -206,16 +228,17 @@ SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num, 'nba
               SELECT g.game_id, o.official_id, o.jersey_num, 'kaggle_eoinamoore'
               FROM (SELECT DISTINCT lpad(gameId, 10, '0') AS game_id, trim(unnest(string_split(officials, ','))) AS name
                     FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__games WHERE nullif(trim(officials), '') IS NOT NULL) g
-              JOIN (SELECT lower(first_name || ' ' || last_name) AS name, any_value(official_id) AS official_id, any_value(jersey_num) AS jersey_num
-                    FROM core.dim_official GROUP BY 1 HAVING count(*) = 1) o ON o.name = lower(g.name)
+              JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('g.name') + '''
               WHERE g.game_id NOT IN (SELECT game_id FROM raw.officials)
                 AND g.game_id NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
                                       AND official_id IS NOT NULL AND game_id IS NOT NULL)
               UNION ALL  -- Kaggle kyleknowles1 referee assignments 2016-2026 (NBA game and referee ids), only for games no source above has
-              SELECT DISTINCT lpad(k.game_id, 10, '0'), try_cast(k.code AS BIGINT), k.jnum, 'kaggle_kyleknowles1'
-              FROM (SELECT game_id, unnest([official1_code, official2_code, official3_code, official4_code]) AS code,
+              SELECT DISTINCT lpad(k.game_id, 10, '0'), coalesce(o.official_id, try_cast(k.code AS BIGINT)), k.jnum, 'kaggle_kyleknowles1'
+              FROM (SELECT game_id, unnest([official1, official2, official3, official4]) AS name,
+                           unnest([official1_code, official2_code, official3_code, official4_code]) AS code,
                            unnest([official1_JNum, official2_JNum, official3_JNum, official4_JNum]) AS jnum
                     FROM raw_kaggle.kyleknowles1_nba_referee_assignments) k
+              LEFT JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('k.name') + '''
               WHERE nullif(trim(k.code), '') IS NOT NULL
                 AND lpad(k.game_id, 10, '0') NOT IN (SELECT game_id FROM raw.officials)
                 AND lpad(k.game_id, 10, '0') NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
@@ -225,33 +248,33 @@ SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num, 'nba
               UNION ALL  -- ESPN 1996-2002 crews (sportsdataverse release, load_espn_officials.py), only for games no source above has
               SELECT DISTINCT e.game_id, o.official_id, o.jersey_num, 'espn_sdv'
               FROM raw.espn_sdv_game_official e
-              JOIN (SELECT name, any_value(official_id) AS official_id, any_value(jersey_num) AS jersey_num
-                    FROM (SELECT DISTINCT lower(first_name || ' ' || last_name) AS name, official_id, jersey_num FROM core.dim_official
-                          UNION  -- ESPN spellings already resolved to NBA referee ids (e.g. 'Eddie F. Rush', 'Dee Kantner')
-                          SELECT DISTINCT lower(b.espn_official_full_name), b.official_id, d.jersey_num FROM raw.bridge_official_espn b
-                          JOIN core.dim_official d USING (official_id) WHERE NOT b.is_ambiguous AND NOT b.is_unresolved)
-                    GROUP BY 1 HAVING count(DISTINCT official_id) = 1) o ON o.name = lower(trim(e.official_full_name))
+              JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('e.official_full_name') + '''
               WHERE e.game_id IS NOT NULL
                 AND e.game_id NOT IN (SELECT game_id FROM raw.officials)
                 AND e.game_id NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
                                       AND official_id IS NOT NULL AND game_id IS NOT NULL)
                 AND e.game_id NOT IN (SELECT lpad(gameId, 10, '0') FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__games
                                       WHERE nullif(trim(officials), '') IS NOT NULL)
-)
-              SELECT * FROM base
-              UNION ALL  -- Basketball-Reference box-page crews, only to complete games where the sources above name fewer than 3 officials
-              SELECT * FROM (              SELECT DISTINCT g.game_id, o.official_id, o.jersey_num, 'bref_box'
+),
+bb AS (  -- Basketball-Reference box-page crews (referee ids resolved by load_bref.official_map)
+              SELECT DISTINCT g.game_id, m.official_id, d.jersey_num, 'bref_box' AS source
               FROM raw.bref_box_official b
+              JOIN raw.bref_official_map m USING (bref_referee_id)
+              LEFT JOIN core.dim_official d ON d.official_id = m.official_id
               JOIN core.team_source_id t ON t.source_system = 'basketball_reference' AND t.league = 'NBA' AND t.source_key = substr(b.bref_game_key, 10)
               JOIN core.dim_game g ON g.home_team_id = t.team_id AND strftime(g.game_date, '%Y%m%d') = substr(b.bref_game_key, 1, 8)
                    AND t.season_end_year = CAST(substr(g.season_year, 1, 4) AS INTEGER) + 1
-              JOIN (SELECT name, any_value(official_id) AS official_id, any_value(jersey_num) AS jersey_num
-                    FROM (SELECT DISTINCT lower(first_name || ' ' || last_name) AS name, official_id, jersey_num FROM core.dim_official
-                          UNION SELECT DISTINCT lower(b.espn_official_full_name), b.official_id, d.jersey_num FROM raw.bridge_official_espn b
-                          JOIN core.dim_official d USING (official_id) WHERE NOT b.is_ambiguous AND NOT b.is_unresolved)
-                    GROUP BY 1 HAVING count(DISTINCT official_id) = 1) o ON o.name = lower(b.official_name)
-              WHERE g.season_type IN ('Regular', 'Playoffs')) bb
-              WHERE bb.game_id IN (SELECT game_id FROM base GROUP BY 1 HAVING count(DISTINCT official_id) < 3)
+              WHERE g.season_type IN ('Regular', 'Playoffs')),
+bb_full AS (SELECT game_id FROM bb GROUP BY 1 HAVING count(DISTINCT official_id) >= 3),
+espn_only AS (  -- games whose crew comes only from ESPN, which Basketball-Reference outranks
+              SELECT game_id FROM base GROUP BY 1 HAVING bool_and(source IN ('espn', 'espn_sdv')))
+              SELECT * FROM base WHERE game_id NOT IN (SELECT game_id FROM espn_only WHERE game_id IN (SELECT game_id FROM bb_full))
+              UNION ALL  -- a full Basketball-Reference crew replaces an ESPN-only crew
+              SELECT * FROM bb WHERE game_id IN (SELECT game_id FROM espn_only) AND game_id IN (SELECT game_id FROM bb_full)
+              UNION ALL  -- otherwise Basketball-Reference only completes games where NBA-sourced data names fewer than 3 officials
+              SELECT * FROM bb
+              WHERE bb.game_id NOT IN (SELECT game_id FROM espn_only)
+                AND bb.game_id IN (SELECT game_id FROM base GROUP BY 1 HAVING count(DISTINCT official_id) < 3)
                 AND (bb.game_id, bb.official_id) NOT IN (SELECT game_id, official_id FROM base)''',
            key=['game_id', 'official_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'official_id': 'core.dim_official(official_id)'},

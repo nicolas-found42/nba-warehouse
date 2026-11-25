@@ -17,6 +17,16 @@ The goal was to replace per-page fetching with whole-season or bulk files that a
 | Starters, play-by-play, shots | NBA.com `boxscoretraditionalv3` / `playbyplayv3`, per game | NBA.com | NBA game ids | `fetch_nba_gaps.py`, `load_nba_gaps.py` |
 | Referees, starters, shots | Kaggle eoinamoore (already loaded in step 1) | NBA.com live data | NBA game ids | `promote_domains.py`, `fill_local_gaps.py` |
 
+## Referee name matching (fixed 2026-11-25)
+
+After the Basketball-Reference crew pages loaded, 686 games still had fewer than 3 officials. 795 of the 799 pages name all 3 officials, so the loss was in matching names to referee ids, not in the source:
+
+- Several referees carry two or three `official_id`s: the NBA box-score id plus duplicates from Kaggle and ESPN rows (for example Jacyn Goble 1627962 and 203219, Sean Corbin 1151 and 1962936541). The old matcher dropped every ambiguous name. `promote_domains.OFFICIAL_NAME_CANON` now resolves a name to the id NBA box scores use most, then the id the Kaggle assignments use most. Names are compared as lowercase letters only, so "ShaRae" matches "Sha'Rae".
+- Basketball-Reference ids map through `raw.bref_official_map` (`load_bref.official_map`). The map uses explicit aliases where names differ: Tommy Nunez Sr. → 1181, James Capers Jr. → 1148, Sean Corbin → 1151. Six 1990s referees with no NBA id get synthetic ids from 1689000001: Rusty Herring, Lee Jones, Woody Mayfield, Paul Mihalak, Jake O'Donnell and Ed T. Rush. Ed T. Rush worked 30 games alongside Eddie F. Rush (1190), so they are different people.
+- Where a game's crew comes only from ESPN and Basketball-Reference has the full crew, Basketball-Reference replaces it because it ranks higher. For example, ESPN lists "Tommy Nunez Jr." for 1997-2000 games where Basketball-Reference lists Tommy Nunez Sr.
+
+Result: games with fewer than 3 officials fell from 686 to 37.
+
 ## Checked and not useful
 
 - Basketball-Reference player game-log pages are disallowed by robots.txt. They were fetched on the owner's decision, at the site's limit of 20 per minute.
