@@ -70,6 +70,7 @@ def load(c) -> None:
     mexico_periods(c)
     indiana_team_box(c)
     barcelona_crew(c, names)
+    flamengo_crew(c, names)
 
 
 def verified_official(c, names: dict, first: str, last: str, source_url: str) -> int:
@@ -115,6 +116,31 @@ def barcelona_crew(c, names: dict) -> None:
             WHERE NOT EXISTS (SELECT 1 FROM audit.gap_attempt WHERE domain='officials' AND game_id=?
                 AND source='verified_press_crew' AND outcome='admitted')''', [game, source, game])
     print(f'Barcelona crew verified: {game}', flush=True)
+
+
+def flamengo_crew(c, names: dict) -> None:
+    witness = CREW_EVIDENCE / 'verified-2004-2015-followup' / 'fpb-benito-history.html'
+    if not witness.is_file():
+        return
+    raw = witness.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    game = '0011500069'
+    source = 'https://fpb.com.br/o-arbitro-paulista-marcos-benito-fez-historia/'
+    fixture = c.execute('''SELECT home_team_id,away_team_id,home_score,away_score FROM core.fact_game
+        WHERE game_id=? AND game_date=DATE '2015-10-17' ''', [game]).fetchone()
+    cutler, stafford = names.get('kevincutler'), names.get('derrickstafford')
+    if digest != '0fd2361a7a57b66ad77affafee9e617c12bd52729d380ead2273cefeb86762ff' or (
+            fixture != (12325, 1610612753, 73, 90) or not cutler or not stafford or cutler == stafford):
+        raise ValueError('reviewed Flamengo fixture or referee identity disagrees')
+    with warehouse_transaction(c):
+        benito = verified_official(c, names, 'Marcos', 'Fornies Benito', source)
+        crew = ((cutler, 'Kevin Cutler'), (stafford, 'Derrick Stafford'), (benito, 'Marcos Fornies Benito'))
+        c.executemany('INSERT OR IGNORE INTO raw.press_game_official VALUES (?,?,?,?,?,?)',
+                      [(game, pid, name, i, source, digest) for i, (pid, name) in enumerate(crew, 1)])
+        c.execute('''INSERT INTO audit.gap_attempt SELECT 'officials',?,'verified_press_crew',now(),'admitted',?
+            WHERE NOT EXISTS (SELECT 1 FROM audit.gap_attempt WHERE domain='officials' AND game_id=?
+                AND source='verified_press_crew' AND outcome='admitted')''', [game, source, game])
+    print(f'Flamengo crew verified: {game}', flush=True)
 
 
 def mexico_periods(c) -> None:

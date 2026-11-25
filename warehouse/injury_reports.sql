@@ -103,9 +103,11 @@ GROUP BY ALL;
 
 CREATE OR REPLACE MACRO core.injury_report_at(fixture, known_at) AS TABLE
 WITH choice AS (
-    SELECT f.*, core.injury_team_code(away.abbreviation) || '@' || core.injury_team_code(home.abbreviation) AS matchup
+    SELECT f.* REPLACE (least(f.tipoff_at, completed.game_datetime_est AT TIME ZONE 'America/New_York') AS tipoff_at),
+           core.injury_team_code(away.abbreviation) || '@' || core.injury_team_code(home.abbreviation) AS matchup
     FROM core.pregame_fixture_at(fixture, known_at) f
     JOIN core.dim_team away ON away.team_id = f.away_team_id JOIN core.dim_team home ON home.team_id = f.home_team_id
+    LEFT JOIN core.dim_game completed ON completed.game_id = f.game_id AND completed.result_status = 'final'
 ), roster AS (
     SELECT team_id, core.injury_name_key(player_name) AS name_key, min(person_id) AS person_id
     FROM core.roster_at(fixture, known_at) GROUP BY ALL HAVING count(DISTINCT person_id) = 1

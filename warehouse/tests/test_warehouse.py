@@ -218,3 +218,25 @@ def test_coverage_gives_up_after_two_independent_sources(tmp_path: Path) -> None
     assert status == {'A': 'source_unavailable', 'B': 'missing_recoverable', 'C': 'disputed'}
     pbp = dict(c.execute("SELECT game_id, status FROM audit.game_coverage WHERE domain = 'play_by_play'").fetchall())
     assert set(pbp.values()) == {'not_tracked'}
+
+
+def test_coverage_requires_five_starters_for_each_team():
+    c = duckdb.connect()
+    c.execute(CORE_DDL)
+    c.execute('''ALTER TABLE core.dim_game ADD COLUMN season_start SMALLINT;
+        ALTER TABLE core.dim_game ADD COLUMN season_type VARCHAR;
+        ALTER TABLE core.dim_game ADD COLUMN result_status VARCHAR;
+        ALTER TABLE core.dim_game ADD COLUMN league_era VARCHAR;
+        INSERT INTO core.dim_game VALUES ('bad','2004-05','2004-10-27',2004,'Preseason','final','NBA'),
+            ('valid','2004-05','2004-10-27',2004,'Preseason','final','NBA');
+        CREATE TABLE core.fact_starting_lineup (game_id VARCHAR, team_id BIGINT);
+        INSERT INTO core.fact_starting_lineup SELECT 'bad',1 FROM range(7);
+        INSERT INTO core.fact_starting_lineup SELECT 'bad',2 FROM range(5);
+        INSERT INTO core.fact_starting_lineup SELECT 'valid',1 FROM range(5);
+        INSERT INTO core.fact_starting_lineup SELECT 'valid',2 FROM range(5);
+        CREATE TABLE core.fact_game_official (game_id VARCHAR);
+        CREATE TABLE audit.period_availability_v26 (game_id VARCHAR, status VARCHAR);''')
+    tracked = ', '.join(f"('{k}', {v})" for k, v in coverage.TRACKED_FROM.items())
+    c.execute(coverage.SQL.replace('{tracked}', tracked))
+    assert c.execute("SELECT game_id,status FROM audit.game_coverage WHERE domain='starting_lineup' ORDER BY game_id").fetchall() == [
+        ('bad', 'partial'), ('valid', 'present')]

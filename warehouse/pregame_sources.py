@@ -112,6 +112,10 @@ def publish(c, capture_data=None) -> None:
     c.execute('''CREATE TABLE IF NOT EXISTS raw.nba_pregame_schedule (
         game_id VARCHAR, game_date DATE, start_time TIMESTAMPTZ, home_team_id BIGINT, away_team_id BIGINT,
         status VARCHAR, source_url VARCHAR, captured_at TIMESTAMPTZ, sha256 VARCHAR)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS raw.nba_initial_schedule (
+        game_id VARCHAR, game_date DATE, start_time TIMESTAMPTZ, home_team_id BIGINT, away_team_id BIGINT,
+        source_url VARCHAR, published_at TIMESTAMPTZ, sha256 VARCHAR,
+        PRIMARY KEY (game_id,source_url,sha256))''')
     c.execute('''CREATE TABLE IF NOT EXISTS raw.nba_roster_capture (
         team_id BIGINT, person_id BIGINT, player_name VARCHAR, jersey_number VARCHAR, position VARCHAR,
         source_date DATE, observed_at TIMESTAMPTZ, source_url VARCHAR, sha256 VARCHAR,

@@ -21,6 +21,8 @@ DETROIT = '0045700221'
 OAKLAND = '0010400105'
 ANAHEIM = '0010500098'
 PARKER = '0010500119'
+KNICKS_2004 = '0010400108'
+KNICKS_2004_PERIODS = 'https://archive.sltrib.com/article.php?id=2433748&itype=NGPSID'
 DETROIT_BOX = '/boxscores/195803150DET.html'
 DETROIT_REPORT = 'https://www.nba.com/pistons/news/pistons-digest-sorting-out-rotations-back-end-on-pistons-to-do-list-with-a-month-to-go'
 KNICKS_1951_BOX = '/boxscores/195103310NYK.html'
@@ -76,6 +78,7 @@ PINNED = {
     'espn-241026020.json': '80c355f3f36fe151d4de898c952c3adb16e128211c20860ee486e3f37f6dd2ee',
     'espn-241026021.json': '522ff0ceaca3f3cc96bee1cd13cecce8e9eac8cdc30c63289959e2d08169ef96',
     'espn-241028018.json': '6d7515b0d5f554d7858fe7a5440a3143aff6756cc6229390a93e7fa8ee13beea',
+    'sltrib-20041029-utanyk.html': '7d5bd5a8f8054e06d871c12c47d8b7a264e56c2b85f158674c514b3b0fef3a4e',
 }
 
 
@@ -119,7 +122,7 @@ def check_scoring(line, points):
         raise ValueError('published shooting and scoring disagree')
 
 
-def publish_periods(c, game, home, away, final, periods):
+def publish_periods(c, game, home, away, final, periods, source=SOURCE, note='Source receipts in audit.historical_fixture_correction'):
     if len(periods) != 2 or len(periods[0]) != len(periods[1]) or not 4 <= len(periods[0]) <= 10 or any(
             sum(line) != score for line, score in zip(periods, final)):
         raise ValueError(f'reviewed periods do not reconcile: {game}')
@@ -128,8 +131,7 @@ def publish_periods(c, game, home, away, final, periods):
     c.executemany('INSERT INTO core.fact_game_period_score VALUES (?,?,?,?)',
                   [(game, team, number, points) for team, line in zip((home, away), periods)
                    for number, points in enumerate(line, 1)])
-    c.execute("INSERT INTO audit.gap_attempt VALUES ('period_scores',?,?,now(),'admitted','Source receipts in audit.historical_fixture_correction')",
-              [game, SOURCE])
+    c.execute("INSERT INTO audit.gap_attempt VALUES ('period_scores',?,?,now(),'admitted',?)", [game, source, note])
 
 
 def check_players(c, game, home, away, final):
@@ -305,7 +307,7 @@ def reconcile_preseason(c, game):
                  for team in event['teams']}
     usa_periods = tuple(usa_lines[event[side]['id']] for side in ('homeTeam', 'awayTeam'))
     quarters_agree = periods == usa_periods
-    if quarters_agree == (game == '0010400108'):
+    if quarters_agree == (game == KNICKS_2004):
         raise ValueError(f'the expected cross-source quarter agreement changed for {game}')
     review = [{"url": USA_STATS + eid, "sha256": PINNED[primary.name], "verified_venue": event['venue']['name'],
                "home_away_quarters": usa_periods},
@@ -381,6 +383,42 @@ def reconcile_parker(c):
     print('Restored the reported Smush Parker identity and minutes for the October 28, 2005 Lakers box', flush=True)
 
 
+def reconcile_knicks_2004_periods(c):
+    path = CACHE / 'verified-2004-2015-followup' / 'sltrib-20041029-utanyk.html'
+    usatoday = CACHE / 'usatoday-stats-541932.html'
+    if not path.is_file() or not usatoday.is_file() or c.execute(
+            'SELECT 1 FROM core.fact_game_period_score WHERE game_id=? LIMIT 1', [KNICKS_2004]).fetchone():
+        return
+    home, away, final, day = 1610612752, 1610612762, (89, 83), '2004-10-28'
+    event, _ = usa_box(read_evidence(usatoday), '541932', day, 2004, home, away, 'NYK', 'UTA', final, 'Madison Square Garden')
+    printed = dict((team, (digits, int(total))) for team, digits, total in re.findall(
+        r'<B>(Utah|New York) (\d{8}) - (\d{2})</B>', read_evidence(path).decode(errors='replace')))
+    fields = [printed[team] for team in ('New York', 'Utah')]
+    source_periods = tuple([int(digits[i:i + 2]) for i in range(0, 8, 2)] for digits, _ in fields)
+    usa_lines = {team['id']: [v['score'] for v in sorted(team['lineScores'], key=lambda row: row['period'])] for team in event['teams']}
+    if tuple(total for _, total in fields) != final or source_periods != tuple(usa_lines[event[side]['id']]
+                                                                               for side in ('homeTeam', 'awayTeam')):
+        raise ValueError('Salt Lake Tribune periods disagree with the matched USA TODAY fixture')
+    fixture = c.execute('''SELECT home_team_id,away_team_id,home_score,away_score FROM core.fact_game
+        WHERE game_id=? AND game_date=DATE '2004-10-28' ''', [KNICKS_2004]).fetchone()
+    if fixture != (home, away, *final):
+        raise ValueError('corrected Utah–New York result not present')
+    with warehouse_transaction(c):
+        c.execute('''CREATE TABLE IF NOT EXISTS audit.period_receipt_newspaper (
+            game_id VARCHAR PRIMARY KEY, page_url VARCHAR, ocr_url VARCHAR, ocr_sha256 VARCHAR,
+            passage VARCHAR, recorded_at TIMESTAMPTZ)''')
+        c.execute('''INSERT INTO audit.period_receipt_newspaper VALUES (?,?,NULL,NULL,?,now())''',
+                  [KNICKS_2004, KNICKS_2004_PERIODS, f'Utah {fields[1][0]} - 83. New York {fields[0][0]} - 89.'])
+        c.execute('''CREATE TABLE IF NOT EXISTS audit.period_receipt_publication (
+            game_id VARCHAR, source_url VARCHAR, sha256 VARCHAR, home_periods INTEGER[], away_periods INTEGER[],
+            method VARCHAR, PRIMARY KEY (game_id,source_url))''')
+        c.executemany('INSERT OR IGNORE INTO audit.period_receipt_publication VALUES (?,?,?,?,?,?)',
+                      [(KNICKS_2004, url, PINNED[source_path.name], *source_periods, 'printed_period_scores')
+                       for url, source_path in ((KNICKS_2004_PERIODS, path), (USA_STATS + '541932', usatoday))])
+        publish_periods(c, KNICKS_2004, home, away, final, source_periods, 'newspaper_sltrib', KNICKS_2004_PERIODS)
+    print('Published Utah–New York period scores from the exact Salt Lake Tribune line and USA TODAY', flush=True)
+
+
 def load(c):
     c.execute('''CREATE TABLE IF NOT EXISTS audit.historical_fixture_correction (
         game_id VARCHAR PRIMARY KEY, corrected_at TIMESTAMPTZ, sources JSON, previous_fixture JSON, previous_final JSON,
@@ -391,6 +429,7 @@ def load(c):
     reconcile_philadelphia_1958(c)
     for game in PRESEASON:
         reconcile_preseason(c, game)
+    reconcile_knicks_2004_periods(c)
     reconcile_parker(c)
 
 

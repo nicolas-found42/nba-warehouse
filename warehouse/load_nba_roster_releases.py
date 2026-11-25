@@ -74,16 +74,17 @@ def parse_rosters(text: str, release: RosterRelease) -> dict[int, list[tuple[str
         for name, center in cells:
             if not re.fullmatch(r"[^\W\d_](?:[^\W\d_]|[ .,’'‐–-]|\b(?:II|III|IV)\b)+\*?", name):
                 continue
+            member_status = 'two_way' if name.endswith('*') else status
             name = name.removesuffix('*').replace('‐', '-')
             if ',' in name:
                 last, first = name.split(',', maxsplit=1)
                 name = f'{first.strip()} {last.strip()}'
-            elif len(name.split()) < 2:
+            elif len(name.split()) < 2 and normalized(name) != 'nene':
                 continue
             team, distance = min(((team, abs(center - anchor)) for team, anchor in columns), key=lambda item: item[1])
             if distance > 17:
                 raise ValueError(f'roster name is outside the team columns: {name}')
-            rosters[team].append((name, status))
+            rosters[team].append((name, member_status))
     if len(rosters) != release.teams or any(not 10 <= len(players) <= 22 or len({name for name, _ in players}) != len(players)
                                            for players in rosters.values()):
         raise ValueError(f'unexpected team or roster shape in {release.filename}')
@@ -121,7 +122,9 @@ def load(c) -> None:
             team_id BIGINT, printed_name VARCHAR, printed_status VARCHAR, person_id BIGINT, available_at TIMESTAMPTZ,
             effective_on DATE, source_url VARCHAR, publication_url VARCHAR, sha256 VARCHAR,
             PRIMARY KEY (team_id,printed_name,sha256))''')
-        c.executemany('INSERT OR IGNORE INTO audit.nba_roster_release_name VALUES (?,?,?,?,?,?,?,?,?)', evidence)
+        c.executemany('''INSERT INTO audit.nba_roster_release_name VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (team_id,printed_name,sha256) DO UPDATE SET printed_status=excluded.printed_status,
+            person_id=excluded.person_id''', evidence)
         publish_pregame(c, (None, None, roster_rows, publications))
     print(f'Published {len(roster_rows)} linked historical roster names of {len(evidence)} printed across {len(publications)} releases', flush=True)
 

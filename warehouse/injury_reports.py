@@ -10,9 +10,11 @@ import subprocess
 import time
 import xml.etree.ElementTree as ETxml
 from bisect import bisect_right
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import astuple, dataclass, replace
 from itertools import groupby
 from pathlib import Path
+from threading import Lock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -31,6 +33,7 @@ LEGACY_MINUTE_CHANGE = dt.datetime(2025, 12, 19, 16, tzinfo=ET)
 QUARTER_HOUR = dt.datetime(2025, 12, 22, 9, tzinfo=ET)
 STATUSES = {'Out', 'Doubtful', 'Questionable', 'Probable', 'Available'}
 TEAM_NOTES = {'NOT YET SUBMITTED', 'ALL PLAYERS AVAILABLE'}
+ARCHIVE_REPLAY_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -209,14 +212,28 @@ def publish(c, reports: dict, mirror: list[Path] | None = None, pregame=None) ->
         c.execute('''CREATE TABLE IF NOT EXISTS raw.nba_injury_report_retrieval (
             source_url VARCHAR, sha256 VARCHAR, retrieval_url VARCHAR,
             PRIMARY KEY (source_url, sha256, retrieval_url))''')
-        for path, (digest, stamp, rows) in reports.items():
-            source = NBA + path.name
-            c.execute('INSERT OR IGNORE INTO raw.nba_injury_report_retrieval VALUES (?,?,?)',
-                      [source, digest, retrieval_url(path)])
-            c.execute('DELETE FROM raw.nba_injury_report WHERE source_url = ? AND sha256 = ?', [source, digest])
+        if reports:
+            documents, retrieved = {}, set()
+            for path, report in reports.items():
+                source, digest = NBA + path.name, report[0]
+                key = (source, digest)
+                if key in documents and documents[key] != report:
+                    raise ValueError(f'one injury PDF digest has conflicting parsed rows: {path.name}')
+                documents[key] = report
+                retrieved.add((source, digest, retrieval_url(path)))
+            c.execute('''CREATE OR REPLACE TEMP TABLE injury_pdf_replay AS
+                SELECT unnest(?::VARCHAR[]) AS source_url, unnest(?::VARCHAR[]) AS sha256,
+                       unnest(?::VARCHAR[]) AS retrieval_url''', list(zip(*sorted(retrieved))))
+            c.execute('INSERT OR IGNORE INTO raw.nba_injury_report_retrieval SELECT * FROM injury_pdf_replay')
+            c.execute('''DELETE FROM raw.nba_injury_report USING injury_pdf_replay d
+                WHERE raw.nba_injury_report.source_url=d.source_url AND raw.nba_injury_report.sha256=d.sha256''')
+            rows = [(source, digest, i, stamp, *astuple(row)) for (source, digest), (_, stamp, parsed) in documents.items()
+                    for i, row in enumerate(parsed, 1)]
             if rows:
-                c.executemany('INSERT INTO raw.nba_injury_report VALUES (?,?,?,?,?,?,?,?,?,?)',
-                              [(source, digest, i, stamp, *astuple(row)) for i, row in enumerate(rows, 1)])
+                c.execute('''INSERT INTO raw.nba_injury_report
+                    SELECT unnest(?::VARCHAR[]), unnest(?::VARCHAR[]), unnest(?::INTEGER[]), unnest(?::TIMESTAMPTZ[]),
+                           unnest(?::DATE[]), unnest(?::VARCHAR[]), unnest(?::VARCHAR[]), unnest(?::VARCHAR[]),
+                           unnest(?::VARCHAR[]), unnest(?::VARCHAR[])''', list(zip(*rows)))
         for path in mirror or []:
             season = int(path.stem)
             c.execute('DELETE FROM raw.nba_injury_report_mirror WHERE season = ?', [season])
@@ -290,41 +307,54 @@ def archive_pdfs(warehouse: Path, catalog: Path, start: dt.date, end: dt.date) -
                 entries[name] = (day, capture, int(row['ending_season']), bool(row.get('mirror_url')))
     ordered = sorted(entries.items(), key=lambda item: (item[1][0], item[0]), reverse=True)
     imported = failures = 0
-    for (year, week), batch in groupby(ordered, key=lambda entry: entry[1][0].isocalendar()[:2]):
-        reports = {}
-        for name, (_, capture, season, has_mirror) in batch:
-            primary = CACHE / 'pdf' / name
-            mirrored = CACHE / 'pdf-mirror' / str(season) / name
-            candidates = [primary]
-            if mirrored.is_file():
-                candidates.insert(int(primary.is_file()), mirrored)
-            elif has_mirror:
-                candidates.append(mirrored)
-            if capture:
-                candidates.append(CACHE / 'pdf-wayback' / capture / name)
-            errors = []
-            for path in candidates:
-                try:
-                    download(retrieval_url(path), path)
-                    if not path.is_file():
-                        continue
-                    document = read_pdf(path)
-                    if report_filename(document[1]) != name:
-                        raise ValueError(f'printed timestamp {document[1].isoformat()} disagrees with indexed filename')
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        for (year, week), batch in groupby(ordered, key=lambda entry: entry[1][0].isocalendar()[:2]):
+            reports = {}
+            for result in pool.map(load_archive_entry, batch):
+                if result is None:
+                    failures += 1
+                else:
+                    path, document = result
                     reports[path] = document
-                    break
-                except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                    errors.append(f'{retrieval_url(path)}: {exc}')
-            else:
-                failures += 1
-                print(f'Held archived injury report {name}: {". ".join(errors) or "no candidate URL yielded a PDF"}', flush=True)
-        if reports:
-            with warehouse_lock(), connect(warehouse) as c:
-                publish(c, reports)
-            imported += len(reports)
-            print(f'Published {len(reports)} original injury PDFs for ISO week {year}-{week:02}', flush=True)
+            if reports:
+                with warehouse_lock(), connect(warehouse) as c:
+                    publish(c, reports)
+                imported += len(reports)
+                print(f'Published {len(reports)} original injury PDFs for ISO week {year}-{week:02}', flush=True)
     print(f'Published {imported} of {len(entries)} catalogued injury PDFs; {failures} require another check', flush=True)
     return failures == 0
+
+
+def load_archive_entry(entry):
+    name, (_, capture, season, has_mirror) = entry
+    primary = CACHE / 'pdf' / name
+    mirrored = CACHE / 'pdf-mirror' / str(season) / name
+    candidates = [primary]
+    if mirrored.is_file():
+        candidates.insert(int(primary.is_file()), mirrored)
+    elif has_mirror:
+        candidates.append(mirrored)
+    if capture:
+        candidates.append(CACHE / 'pdf-wayback' / capture / name)
+    errors = []
+    for path in candidates:
+        try:
+            url = retrieval_url(path)
+            if path.parent.parent == CACHE / 'pdf-wayback':
+                with ARCHIVE_REPLAY_LOCK:
+                    download(url, path)
+            else:
+                download(url, path)
+            if not path.is_file():
+                continue
+            document = read_pdf(path)
+            if report_filename(document[1]) != name:
+                raise ValueError(f'printed timestamp {document[1].isoformat()} disagrees with indexed filename')
+            return path, document
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            errors.append(f'{retrieval_url(path)}: {exc}')
+    print(f'Held archived injury report {name}: {". ".join(errors) or "no candidate URL yielded a PDF"}', flush=True)
+    return None
 
 
 def main() -> None:

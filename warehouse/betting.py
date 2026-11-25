@@ -31,7 +31,10 @@ CREATE OR REPLACE TEMP TABLE team_name AS
 SELECT DISTINCT lower(full_name) AS name, team_id, valid_from, coalesce(valid_to, 9999) AS valid_to, 1 AS pref
 FROM core.dim_team_version WHERE full_name IS NOT NULL
 UNION SELECT DISTINCT lower(display_name), team_id, 0, 9999, 2 FROM core.dim_team WHERE display_name IS NOT NULL
-UNION SELECT 'los angeles clippers', 1610612746, 0, 9999, 1;   -- feed spelling of LA Clippers
+UNION SELECT 'los angeles clippers', 1610612746, 0, 9999, 1
+UNION SELECT 'guangzhou loong lions', 15018, 2025, 2025, 1
+UNION SELECT 'usa stars', 1610616859, 2025, 2025, 1
+UNION SELECT 'usa stripes', 1610616860, 2025, 2025, 1;
 
 CREATE OR REPLACE TEMP TABLE game_slot AS
 SELECT g.game_id, g.season_year, g.season_type,
@@ -63,29 +66,54 @@ FROM raw.fact_game_market_odds;
 
 CREATE OR REPLACE TEMP TABLE keyed_team AS
 SELECT k.*,
-  (SELECT arg_min(t.team_id, t.pref) FROM team_name t WHERE t.name = k.n1
-     AND year(k.snapshot_ts - INTERVAL 6 MONTH) + 1 BETWEEN t.valid_from AND t.valid_to + 1) AS team1_id,
-  (SELECT arg_min(t.team_id, t.pref) FROM team_name t WHERE t.name = k.n2
-     AND year(k.snapshot_ts - INTERVAL 6 MONTH) + 1 BETWEEN t.valid_from AND t.valid_to + 1) AS team2_id
+  CASE WHEN k.n1='world' AND k.n2 IN ('usa stars','usa stripes') AND k.snapshot_ts::DATE=DATE '2026-02-15' THEN 1610616861
+       ELSE (SELECT arg_min(t.team_id, t.pref) FROM team_name t WHERE t.name = k.n1
+             AND year(k.snapshot_ts - INTERVAL 6 MONTH) + 1 BETWEEN t.valid_from AND t.valid_to + 1) END AS team1_id,
+  CASE WHEN k.n2='world' AND k.n1 IN ('usa stars','usa stripes') AND k.snapshot_ts::DATE=DATE '2026-02-15' THEN 1610616861
+       ELSE (SELECT arg_min(t.team_id, t.pref) FROM team_name t WHERE t.name = k.n2
+             AND year(k.snapshot_ts - INTERVAL 6 MONTH) + 1 BETWEEN t.valid_from AND t.valid_to + 1) END AS team2_id
 FROM keyed k;
+
+-- The dated league schedule and a unique same-key published detailed crosswalk corroborate these three early or postponed events.
+CREATE OR REPLACE TEMP TABLE reviewed_pinnacle_fixture AS
+SELECT * FROM (VALUES
+    ('1615035859', DATE '2025-09-10', 'Houston Rockets vs Oklahoma City Thunder', '0022500001'),
+    ('1615035860', DATE '2025-09-14', 'Golden State Warriors vs Los Angeles Lakers', '0022500002'),
+    ('1621897123', DATE '2026-01-08', 'Miami Heat vs Chicago Bulls', '0022500529')
+) AS verified(event_id, quote_day, matchup, game_id);
+
+CREATE OR REPLACE TEMP TABLE reviewed_pinnacle_detail AS
+SELECT v.game_id,v.matchup,b.snapshot_ts
+FROM reviewed_pinnacle_fixture v JOIN raw.bridge_game_market_odds b
+  ON b.matchup=v.matchup AND b.snapshot_ts::DATE=v.quote_day
+GROUP BY ALL HAVING count(DISTINCT b.game_id)=1 AND bool_and(b.game_id=v.game_id);
 
 CREATE OR REPLACE TEMP TABLE cand AS
 SELECT k.source, k.source_key, k.snapshot_ts, k.n1, k.n2, k.is_preseason, s.game_id, s.tip_est,
-       k.team1_id = s.away_team_id AND k.team2_id = s.home_team_id AS away_home_order_agrees
-FROM keyed_team k JOIN game_slot s
+       k.team1_id = s.away_team_id AND k.team2_id = s.home_team_id AS away_home_order_agrees,
+       s.game_id = coalesce(m.game_id, d.game_id) AS reviewed_fixture_agrees
+FROM keyed_team k LEFT JOIN reviewed_pinnacle_fixture m
+  ON k.source='main_line' AND regexp_extract(rtrim(k.source_key,'/'), '/([0-9]+)$', 1)=m.event_id
+ AND k.snapshot_ts::DATE=m.quote_day
+LEFT JOIN reviewed_pinnacle_detail d ON k.source='market_odds' AND d.matchup=k.source_key AND d.snapshot_ts=k.snapshot_ts
+JOIN game_slot s
   ON s.t_lo = least(k.team1_id, k.team2_id) AND s.t_hi = greatest(k.team1_id, k.team2_id)
  AND (k.is_preseason IS NULL OR k.is_preseason = (s.season_type = 'Preseason'))
- AND s.tip_est BETWEEN k.snapshot_ts - INTERVAL 6 HOUR AND k.snapshot_ts + INTERVAL 60 HOUR;
+ AND (s.game_id = coalesce(m.game_id, d.game_id)
+      OR s.tip_est BETWEEN k.snapshot_ts - INTERVAL 6 HOUR AND k.snapshot_ts + INTERVAL 60 HOUR);
 
 CREATE OR REPLACE TEMP TABLE our_match AS
 SELECT k.source, k.source_key, k.snapshot_ts, k.n1, k.n2, k.is_preseason, k.team1_id, k.team2_id,
        CASE WHEN k.team1_id IS NULL OR k.team2_id IS NULL THEN 'team_name_unresolved'
             WHEN count(c.game_id) = 0 THEN 'unmatched'
-            WHEN count(c.game_id) = 1 OR count_if(c.away_home_order_agrees) = 1 THEN 'matched' ELSE 'ambiguous' END AS match_status,
-       CASE WHEN count(c.game_id) = 1 THEN any_value(c.game_id)
+            WHEN count_if(c.reviewed_fixture_agrees) = 1 OR count(c.game_id) = 1 OR count_if(c.away_home_order_agrees) = 1
+                THEN 'matched' ELSE 'ambiguous' END AS match_status,
+       CASE WHEN count_if(c.reviewed_fixture_agrees) = 1 THEN max(c.game_id) FILTER (WHERE c.reviewed_fixture_agrees)
+            WHEN count(c.game_id) = 1 THEN any_value(c.game_id)
             WHEN count_if(c.away_home_order_agrees) = 1 THEN max(c.game_id) FILTER (WHERE c.away_home_order_agrees) END AS game_id,
        list(c.game_id ORDER BY c.tip_est, c.game_id) FILTER (WHERE c.game_id IS NOT NULL) AS candidate_game_ids,
-       CASE WHEN count(c.game_id) = 1 THEN 'sole_time_window_candidate'
+       CASE WHEN count_if(c.reviewed_fixture_agrees) = 1 THEN 'reviewed_event_fixture'
+            WHEN count(c.game_id) = 1 THEN 'sole_time_window_candidate'
             WHEN count_if(c.away_home_order_agrees) = 1 THEN 'sole_away_home_candidate' END AS fixture_link_method
 FROM keyed_team k LEFT JOIN cand c ON c.source = k.source AND c.source_key IS NOT DISTINCT FROM k.source_key
     AND c.snapshot_ts IS NOT DISTINCT FROM k.snapshot_ts AND c.n1 IS NOT DISTINCT FROM k.n1
@@ -129,11 +157,11 @@ WITH review AS (
 SELECT DISTINCT 'main_line' AS source, game_link AS fixture_key, snapshot_ts, match_status,
        game_id, candidate_game_ids, source_game_id, source_match_method, disagrees_with_source, fixture_link_method,
        matched_team1_id AS team1_id, matched_team2_id AS team2_id
-FROM betting.main_line WHERE match_status <> 'matched' OR disagrees_with_source OR fixture_link_method = 'sole_away_home_candidate'
+FROM betting.main_line WHERE match_status <> 'matched' OR disagrees_with_source OR fixture_link_method <> 'sole_time_window_candidate'
 UNION ALL
 SELECT DISTINCT 'market_odds', matchup, snapshot_ts, match_status, game_id, candidate_game_ids,
        source_game_id, source_match_method, disagrees_with_source, fixture_link_method, team1_id, team2_id
-FROM betting.market_odds WHERE match_status <> 'matched' OR disagrees_with_source OR fixture_link_method = 'sole_away_home_candidate')
+FROM betting.market_odds WHERE match_status <> 'matched' OR disagrees_with_source OR fixture_link_method <> 'sole_time_window_candidate')
 SELECT review.* EXCLUDE (team1_id, team2_id),
        CASE WHEN g.game_id IS NULL OR team1_id IS NULL OR team2_id IS NULL THEN 'unavailable'
             WHEN team1_id = g.away_team_id AND team2_id = g.home_team_id THEN 'agrees'

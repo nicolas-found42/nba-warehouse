@@ -111,6 +111,8 @@ Use a timezone-bearing cutoff, such as `2026-11-25T16:00:00-05:00`, with `bettin
 schedule entries ahead of the results refresh. `core.injury_report_final_pregame` adds the separately observed participation
 status after the game. The as-of injury query links identities through rosters available at that cutoff. The final report
 can use the later game box. `audit.injury_report_resolution` records rows still missing a verified game, team or person match.
+`core.pregame_fixture_at(game_id, cutoff)` uses versioned schedule captures and the original August 2025 NBA
+release for exactly matched 2025–26 fixtures. Unlinked schedule entries remain in `audit.nba_initial_schedule_resolution`.
 
 `betting.price_pair` covers full-game moneyline, spread and totals. It exposes decimal prices, implied probabilities,
 overround and two-sided vig removal, with original values in the source tables. `betting.closing_price` uses the last
@@ -123,6 +125,7 @@ so their prices remain visible in `betting.price_pair` and are withheld from the
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py mirror
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py rosters
 uv run --no-project --with duckdb==2.0.0 python warehouse/load_nba_roster_releases.py
+uv run --no-project --with duckdb==2.0.0 python warehouse/load_nba_schedule_releases.py
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py backfill --from-date 2018-12-17 --through 2019-06-14
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py indexed-pdfs --from-date 2021-07-01 --through 2026-06-30
 uv run --no-project --with duckdb==2.0.0 python warehouse/betting.py

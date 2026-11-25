@@ -194,9 +194,22 @@ DOMAINS: list[Domain] = [
               invalid_high_source AS (
                 SELECT game_id, team_id FROM high_source GROUP BY 1,2
                 HAVING count(DISTINCT person_id) <> 5 OR count(DISTINCT source) > 1),
+              verified_nba_flags AS (
+                SELECT DISTINCT s.game_id,s.team_id,s.person_id
+                FROM raw.llimllib_starter s
+                JOIN invalid_high_source b USING (game_id,team_id)
+                JOIN core.fact_player_game_stats p USING (game_id,team_id,person_id)
+                WHERE p.participation_status='played'
+                QUALIFY count(DISTINCT s.person_id) OVER (PARTITION BY s.game_id,s.team_id) = 5),
               hi AS (
                 SELECT * FROM high_source WHERE (game_id,team_id) NOT IN (
-                  SELECT p.game_id,p.team_id FROM press_starters p JOIN invalid_high_source b USING (game_id,team_id)))
+                  SELECT p.game_id,p.team_id FROM press_starters p JOIN invalid_high_source b USING (game_id,team_id)
+                  UNION ALL SELECT game_id,team_id FROM verified_nba_flags)
+                UNION ALL SELECT f.game_id,f.team_id,f.person_id,p.starting_position,'nba_llimllib'
+                FROM verified_nba_flags f LEFT JOIN (
+                  SELECT game_id,team_id,person_id,min(starting_position) AS starting_position
+                  FROM high_source GROUP BY 1,2,3 HAVING count(DISTINCT starting_position) = 1
+                ) p USING (game_id,team_id,person_id))
               SELECT * FROM hi
               UNION ALL  -- archived NBA.com box pages (load_wayback_nba.py): only teams no source above names starters for
               SELECT game_id, team_id, person_id, NULL, 'nba_com_archive' FROM raw.wayback_starter
@@ -359,17 +372,24 @@ ranked AS (
 selected AS (
               SELECT * FROM ranked WHERE game_id NOT IN (SELECT game_id FROM arc_selected)
               UNION ALL SELECT * FROM arc_selected),
-usatoday_crews AS (
-              SELECT game_id, list(DISTINCT official_id ORDER BY official_id) AS officials
-              FROM raw.usatoday_official GROUP BY game_id HAVING count(DISTINCT official_id) = 3),
+confirmation_crew AS (
+              SELECT game_id, official_id, 'usatoday_preseason' AS source, 2 AS priority FROM raw.usatoday_official
+              UNION ALL SELECT game_id,official_id,
+                CASE WHEN contains(source_url, 'hurriyet.com.tr/') THEN 'newspaper_hurriyet' ELSE 'verified_press_crew' END,1
+              FROM raw.press_game_official),
+complete_crew_confirmation AS (
+              SELECT game_id,source,priority,list(DISTINCT official_id ORDER BY official_id) AS officials
+              FROM confirmation_crew GROUP BY 1,2,3 HAVING count(DISTINCT official_id) = 3
+              QUALIFY count(DISTINCT officials) OVER (PARTITION BY game_id,priority) = 1),
 confirmed_partial AS (
-              SELECT s.game_id FROM selected s JOIN usatoday_crews u USING (game_id)
-              GROUP BY s.game_id HAVING count(DISTINCT s.official_id) < 3
-                AND bool_and(list_contains(u.officials, s.official_id))),
+              SELECT s.game_id,u.source,u.priority FROM selected s JOIN complete_crew_confirmation u USING (game_id)
+              GROUP BY s.game_id,u.source,u.priority HAVING count(DISTINCT s.official_id) < 3
+                AND bool_and(list_contains(u.officials, s.official_id))
+              QUALIFY row_number() OVER (PARTITION BY s.game_id ORDER BY u.priority,u.source) = 1),
 supplemented AS (
               SELECT * FROM selected UNION ALL
-              SELECT p.game_id, u.official_id, NULL, 'usatoday_preseason'
-              FROM confirmed_partial p JOIN (SELECT DISTINCT game_id, official_id FROM raw.usatoday_official) u USING (game_id)
+              SELECT p.game_id, u.official_id, NULL, p.source
+              FROM confirmed_partial p JOIN (SELECT DISTINCT game_id,source,official_id FROM confirmation_crew) u USING (game_id,source)
               WHERE (p.game_id, u.official_id) NOT IN (SELECT game_id, official_id FROM selected)),
 official_report AS (
               SELECT DISTINCT game_id,official_id,jersey_num,'nba_official_scorer_report' AS source FROM raw.nba_scorer_crew

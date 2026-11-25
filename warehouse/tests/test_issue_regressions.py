@@ -56,8 +56,8 @@ def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():
         CREATE TABLE core.dim_person(person_id BIGINT,display_name VARCHAR);
         INSERT INTO core.dim_person VALUES (3,'Player One'), (4,'Player Two');
         CREATE TABLE core.dim_game(game_id VARCHAR, game_date DATE, away_team_id BIGINT, home_team_id BIGINT,
-            game_datetime_est TIMESTAMP, participant_status VARCHAR);
-        INSERT INTO core.dim_game VALUES ('0022600001','2026-11-24',1,2,'2026-11-24 19:00','resolved');
+            game_datetime_est TIMESTAMP, participant_status VARCHAR, result_status VARCHAR);
+        INSERT INTO core.dim_game VALUES ('0022600001','2026-11-24',1,2,'2026-11-24 19:00','resolved','final');
         CREATE TABLE core.fact_player_game_stats(game_id VARCHAR,team_id BIGINT,person_id BIGINT,participation_status VARCHAR);
         INSERT INTO core.fact_player_game_stats VALUES ('0022600001',1,4,'played');''')
     day = dt.date(2026, 11, 24)
@@ -75,6 +75,15 @@ def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():
                          [f'{day} {cutoff}:00-05']).fetchall() == result
     assert c.execute('SELECT person_id,status,participation_status FROM core.injury_report_final_pregame').fetchall() == [
         (4, 'Questionable', 'played')]
+    c.execute('''INSERT INTO raw.nba_initial_schedule VALUES
+        ('0022600001','2026-11-24','2026-11-24 21:00:00-05',2,1,'release','2026-08-15 00:00:00-04','release');
+        INSERT INTO raw.nba_roster_capture VALUES
+        (1,9,'Player Nine',NULL,NULL,'2026-11-24','2026-11-24 19:30:00-05','late','late');
+        INSERT INTO raw.nba_roster_publication VALUES ('late','late','2026-11-24 19:32:00-05','fixture');''')
+    assert c.execute("SELECT fixture_source, hour(tipoff_at AT TIME ZONE 'America/New_York') FROM core.pregame_fixture_at('0022600001', TIMESTAMPTZ '2026-11-24 20:00:00-05')").fetchall() == [
+        ('nba_initial_schedule_release', 21)]
+    assert c.execute("SELECT person_id FROM core.roster_at('0022600001', TIMESTAMPTZ '2026-11-24 20:00:00-05') ORDER BY 1").fetchall() == [(3,), (4,)]
+    assert c.execute("SELECT person_id,status FROM core.injury_report_at('0022600001', TIMESTAMPTZ '2026-11-24 20:00:00-05')").fetchall() == [(4, 'Questionable')]
     c.execute('DELETE FROM raw.nba_roster_capture')
     assert c.execute("SELECT player_name,person_id FROM core.injury_report_at('0022600001',TIMESTAMPTZ '2026-11-24 18:00:00-05')").fetchall() == [
         ('Two, Player', None)]  # eventual participation cannot resolve a pregame name
@@ -94,7 +103,7 @@ def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():
     assert c.execute("SELECT disposition FROM audit.injury_report_document WHERE sha256='mirror-version'").fetchone() == (
         'lower_source_priority',)
     c.execute('''INSERT INTO core.dim_team VALUES (5,'SAN','San Antonio Spurs'), (6,'PHI','Philadelphia 76ers');
-        INSERT INTO core.dim_game VALUES ('0022600002','2026-11-24',6,5,'2026-11-24 19:30','resolved');
+        INSERT INTO core.dim_game VALUES ('0022600002','2026-11-24',6,5,'2026-11-24 19:30','resolved','final');
         INSERT INTO raw.nba_injury_report_mirror VALUES
           (2027,'2026-11-24 18:00:00-05','0022600002','2026-11-24','5','21','Out','Unrelated game',NULL,'mirror');''')
     assert c.execute("SELECT game_id,team_id,status FROM core.injury_report_snapshot WHERE game_id='0022600002'").fetchall() == [
@@ -114,13 +123,13 @@ def test_first_schedule_capture_remains_queryable_when_the_fixture_changes():
         CREATE TABLE core.dim_team(team_id BIGINT, display_name VARCHAR, abbreviation VARCHAR);
         INSERT INTO core.dim_team VALUES (1,'Detroit','DET'), (2,'Orlando','ORL');
         CREATE TABLE core.dim_game(game_id VARCHAR,game_date DATE,home_team_id BIGINT,away_team_id BIGINT,
-            game_datetime_est TIMESTAMP,participant_status VARCHAR);''')
+            game_datetime_est TIMESTAMP,participant_status VARCHAR,result_status VARCHAR);''')
     import pregame_sources
     pregame_sources.publish(c)
     c.execute('''INSERT INTO raw.nba_pregame_schedule VALUES
         ('0022600001','2026-11-24','2026-11-24 19:00:00-05',1,2,'scheduled','fixture','2026-11-24 12:00:00-05','a'),
         ('0022600001','2026-11-24','2026-11-24 21:00:00-05',1,2,'scheduled','fixture','2026-11-24 16:00:00-05','b');
-        INSERT INTO core.dim_game VALUES ('0022600001','2026-11-24',1,2,'2026-11-24 21:00:00','resolved');''')
+        INSERT INTO core.dim_game VALUES ('0022600001','2026-11-24',1,2,'2026-11-24 21:00:00','resolved','final');''')
     for cutoff, expected in (('11:00', []), ('15:00', [(19,)]), ('17:00', [(21,)])):
         assert c.execute("SELECT hour(tipoff_at AT TIME ZONE 'America/New_York') FROM core.pregame_fixture_at('0022600001',?::TIMESTAMPTZ)",
                          [f'2026-11-24 {cutoff}:00-05']).fetchall() == expected
@@ -133,8 +142,8 @@ def test_roster_cutoff_uses_published_time_after_capture_start():
         CREATE TABLE core.dim_team(team_id BIGINT, display_name VARCHAR, abbreviation VARCHAR);
         INSERT INTO core.dim_team VALUES (1,'Detroit','DET'), (2,'Orlando','ORL');
         CREATE TABLE core.dim_game(game_id VARCHAR,game_date DATE,home_team_id BIGINT,away_team_id BIGINT,
-            game_datetime_est TIMESTAMP,participant_status VARCHAR);
-        INSERT INTO core.dim_game VALUES ('fixture','2026-11-24',2,1,'2026-11-24 19:00','resolved');''')
+            game_datetime_est TIMESTAMP,participant_status VARCHAR,result_status VARCHAR);
+        INSERT INTO core.dim_game VALUES ('fixture','2026-11-24',2,1,'2026-11-24 19:00','resolved','scheduled');''')
     import pregame_sources
     pregame_sources.publish(c)
     c.execute('''INSERT INTO raw.nba_roster_capture VALUES

@@ -183,6 +183,8 @@ def finalize(warehouse: Path) -> None:
             load_espn.load(c, json.loads((load_espn.CACHE / 'matches.json').read_text()))
         from load_nba_roster_releases import load as load_roster_releases
         load_roster_releases(c)
+        from load_nba_schedule_releases import load as load_schedule_releases
+        load_schedule_releases(c)
         from load_nba_scorer_crews import load as load_scorer_crews
         load_scorer_crews(c)
         for d in pd.DOMAINS:

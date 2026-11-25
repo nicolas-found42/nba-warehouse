@@ -158,20 +158,25 @@ access restrictions establish only that the requested route could not be checked
   [Golden State box](https://sportsdata.usatoday.com/basketball/nba/stats/541929)
   [Utah box](https://sportsdata.usatoday.com/basketball/nba/stats/661261)
 - Five more 2004 preseason finals agree across exact USA TODAY and ESPN games and the published team and player
-  scoring. Four have matching quarter vectors at both sources. Utah–New York ended 83–89 and both sources agree
-  through halftime. Their third- and fourth-quarter values disagree, so those periods are held. Philadelphia’s
-  corrected Utah box restores Aaron McKie’s published one point and leaves his playing time unresolved.
+  scoring. Four have matching quarter vectors at both sources. The Salt Lake Tribune’s contemporary box settles
+  the Utah–New York second-half discrepancy and matches USA TODAY. New York led 65–60 after three quarters.
+  Philadelphia’s corrected Utah box restores Aaron McKie’s published one point and leaves his playing time unresolved.
   [Sacramento–Utah](https://sportsdata.usatoday.com/basketball/nba/stats/541891)
   [New Orleans–Clippers](https://sportsdata.usatoday.com/basketball/nba/stats/541906)
   [Utah–Philadelphia](https://sportsdata.usatoday.com/basketball/nba/stats/541916)
   [Seattle–Phoenix](https://sportsdata.usatoday.com/basketball/nba/stats/541919)
   [Utah–New York](https://sportsdata.usatoday.com/basketball/nba/stats/541932)
+  [Salt Lake Tribune box](https://archive.sltrib.com/article.php?id=2433748&itype=NGPSID)
 - The March 31, 1951 New York–Syracuse playoff was 77–75 in overtime. A contemporary Associated Press box
   confirms the final and 70–70 regulation score, and the original player points already reconcile. The cached
   line score uses `1OT` for the fifth period, as does the March 26, 1950 Syracuse–New York game. The parser now
   accepts contiguous overtime labels and requires a tie before each additional period.
   [1951 Evening Star, image 32](https://www.loc.gov/resource/sn83045462/1951-04-01/ed-1/?sp=32)
   [1950 Evening Star, image 18](https://www.loc.gov/resource/sn83045462/1950-03-27/ed-1/?sp=18)
+- The public Associated Press and Daily Iowan accounts agree that Waterloo’s 86–84 result against Philadelphia required
+  overtime, but the available period line gives the losing side 86 points. The Cleveland–Pittsburgh 1946 line lacks the
+  overtime cells. Both lines remain held. The remaining 182 quarter-score gaps have four failed-source entries per game and
+  explanatory notes in `audit.gap_attempt`.
 - Philadelphia’s March 26, 1958 playoff ended 112–97 against Boston. The Associated Press caption and the next
   day’s New York Times report agree with the printed quarter and shooting totals. The original 111–97 entry
   is preserved in the correction receipt. Boston–New York’s 92–78 game has a contemporaneously verified March
@@ -206,6 +211,15 @@ access restrictions establish only that the requested route could not be checked
   [NC State’s Joe and Mark Lindsay crew](https://stats.gopack.com/sports/m-baskbl/2004-2005/ncsu1126.html)
   [Contemporary Pat Adams report](https://www.courant.com/1995/10/19/only-5646-see-celtics-lose-2/)
   [Barcelona crew](https://20secondtimeout.blogspot.com/2006/10/philadelphia-76ers-open-nba-europe.html)
+- The São Paulo federation identifies Marcos Fornies Benito on the 2015 Orlando–Flamengo crew. The archived NBA
+  report credits calls in that exact game to Benito and names the two NBA officials, Kevin Cutler and Derrick Stafford.
+  [São Paulo federation](https://fpb.com.br/o-arbitro-paulista-marcos-benito-fez-historia/)
+  [Archived NBA original URL](http://nba.com/games/20151017/ORLFLA/gameinfo.html)
+- The old lineup feed reported more than five starters on many team sides. The warehouse replaces an invalid set
+  with the NBA’s explicit starter flags only when exactly five distinct members match played rows for that game
+  and team. It preserves positions with a single recorded value. `audit.starting_lineup_shape` now shows exact named
+  fives for both teams in 40,283 games. The original feed and residual incomplete shapes remain visible.
+  [NBA starter-flag mirror example](https://basketball-data.billmill.org/nba/stats/player_game_status/season=2019/data.parquet)
 - Ten 2026–27 NBA final books supply 30 exact officiating assignments. The source receipt retains the published
   order, names and uniform numbers. Five officials have verified league identities and persistent warehouse IDs.
   Andy Nagy retains his existing NBA ID. Current-season uniform numbers stay on the assignments because historical
@@ -242,11 +256,18 @@ access restrictions establish only that the requested route could not be checked
   24:26 of playing time. The Orange County Register confirms the identity and shooting line. The warehouse’s data
   for that performance had been attributed to Adam Parada. [USA TODAY box](https://sportsdata.usatoday.com/basketball/nba/stats/661281)
   [Orange County Register box](https://www.ocregister.com/2005/10/29/stars-starting-to-align/)
-- Twelve blank NBA.com player names were resolved from cached same-fixture NBA and ESPN stat lines or unique roster
-  remainders. The NBA IDs are preserved. Nineteen still lack reproducible links, including DNP groups without names,
-  jersey numbers or distinctive stats. The legacy Petteri Koponen profile appears in the index under the exact NBA ID.
-  A fresh fetch was blocked. The ESPN fixture validator uses verified numerical identities for eight foreign clubs
-  whose abbreviated labels differ. [Indexed NBA profile](http://nba.com/players/petteri/koponen/1962937467)
+- Twelve blank NBA.com player names were resolved from same-fixture stat lines and roster remainders. Archived
+  October 2016 NBA player directories supply 12 more exact numeric ID links. FC Barcelona and the Israeli league
+  establish the spellings Màxim Esteban and Ofek Avital. The audit retains the matching historical NBA labels.
+  Seven 2015 identities remain unlinked. Milan and Real Madrid legacy IDs are absent from the retrieved directories.
+  Fenerbahçe’s three anonymous IDs have identical DNP fields. Two gamebooks name the players, while the archived
+  NBA roster has no link from those names to the anonymous IDs.
+  [October 9 NBA directory](https://web.archive.org/web/20161009035904id_/http://www.nba.com:80/players/petteri/koponen/1962937467)
+  [October 12 NBA directory](https://web.archive.org/web/20161012211755id_/http://www.nba.com:80/players)
+  [Barcelona report, page 52](https://fcbarcelona.com/fcbarcelona/document/2020/03/03/6bb9c864-7e88-480c-9646-32fbe6da0b51/MEMORIA_CLUB_2018_19_ENG.pdf#page=52)
+  [Ofek Avital’s league profile](https://basket.co.il/player.asp?PlayerId=10519&lang=en)
+  [Fenerbahçe–Brooklyn gamebook](https://statsdmz.nba.com/pdfs/20151005/20151005_FENBKN_book.pdf)
+  [Fenerbahçe–Oklahoma City gamebook](https://statsdmz.nba.com/pdfs/20151009/20151009_FENOKC_book.pdf)
 - Deseret News prints the complete Chicago and Indiana team shooting lines for October 8, 2003. Unprinted fields remain
   null. Philadelphia's March 3, 1950 box includes a documented own basket credited to the team. The published shooting
   totals account for 64 points and the opposition basket contributes two to the official 66. [Chicago–Indiana box](https://deseret.com/2003/10/9/19789070/pacers-96-bulls-82)
@@ -258,7 +279,7 @@ access restrictions establish only that the requested route could not be checked
 - Billmill’s continuously dated NBA team roster captures start November 5, 2026. Its recorded batch start precedes
   the publication of team rows by roughly two minutes in the checked files. As-of roster queries use the source
   object’s verified publication timestamp or the local receipt time. Historical roster releases add two earlier
-  snapshots with 773 linked player names from 843 printed names. `audit.nba_roster_release_name` includes the
+  snapshots with 773 linked player names from 844 printed names. `audit.nba_roster_release_name` includes the
   unlinked names. These dated opening and restart lists establish roster availability for their effective dates.
   [Billmill roster publication code](https://github.com/llimllib/nba_data/blob/d3941f7b3105973ef77bf21409eb6bd9c2b65903/pipeline/stats.py#L438-L485)
   [2018–19 opening rosters](https://ak-static.cms.nba.com/wp-content/uploads/sites/46/2018/10/2018-19-Team-Rosters.pdf)
@@ -271,6 +292,13 @@ access restrictions establish only that the requested route could not be checked
   [Producer timestamp casts](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/projects/test-db/build.py#L552-L625)
   [Boston at Philadelphia](https://www.nba.com/game/bos-vs-phi-0042500116)
   [Houston at the Lakers](https://www.nba.com/game/hou-vs-lal-0042500175)
+- Dated NBA schedules corroborate the two early October-opening quotes and the postponed Miami–Chicago game.
+  The Guangzhou name and two neutral-site All-Star pairings now resolve to their published game IDs. Two
+  Stars–Stripes games have identical participants and venue, so the Pinnacle quote remains unresolved. The
+  legacy source times remain excluded from strict pregame eligibility.
+  [NBA opening schedule](https://pr.nba.com/2025-26-nba-regular-season-schedule)
+  [Miami–Chicago reschedule](https://pr.nba.com/heat-bulls-schedule-adjustments)
+  [Stars–Stripes contemporaneous preview](https://www.si.com/betting/usa-stars-vs-usa-stripes-odds-spread-total-and-prediction-for-2026-nba-all-star-game)
 
 - Billmill serves copies of the original NBA PDFs, including the first 2018 report and samples through the
   2025–26 playoffs. Wayback CDX gives another list of official PDF URLs. The combined 2019–26 index contains
@@ -295,6 +323,11 @@ access restrictions establish only that the requested route could not be checked
   schedule. [Roster schema](https://github.com/llimllib/nba_data/blob/d3941f7b3105973ef77bf21409eb6bd9c2b65903/docs/DATA_DICTIONARY.md#L656-L675)
   [Raw NBA roster capture](https://basketball-data.billmill.org/nba/raw/stats/2027/team_rosters/2026-11-24.json.gz)
   [NBA movement feed](https://stats.nba.com/js/data/playermovement/NBA_Player_Movement.json)
+- The August 14, 2025 NBA schedule lists 1,200 initial 2025–26 games. The warehouse linked 1,191 by exact date
+  and designated teams, audited the other nine, and uses the end of the published day as a conservative availability
+  bound. The original release supplies the fixture until a later official schedule capture supersedes it. Injury and roster
+  observations must also predate the recorded tip of completed games when that tip is earlier than the schedule release.
+  [NBA schedule release](https://pr.nba.com/2025-26-nba-regular-season-schedule)
 - The original Pinnacle source dictionary does not specify timezone or quote publication time. Its dashboard groups the
   field as first and last seen. `betting.pinnacle_match_review` retains ambiguous links, unmatched rows and disagreements
   with the publisher crosswalk. Timestamped Kaggle feeds can enter the pregame views only for verified fixture links and

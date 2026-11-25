@@ -367,14 +367,61 @@ def boxes(c) -> None:
     print('box rows from NBA.com: team', len(trows), '| player', len(prows), 'rows')
 
 
+def archived_player_names(c, unresolved: set[int]) -> dict[int, set[tuple[str, int, str]]]:
+    from html.parser import HTMLParser
+
+    folder = CACHE.parent / 'nba-placeholders-legacy'
+    directories = (
+        ('petteri-koponen-20161009035904-original.html', '2f5b4a0919f50cdf295e7a2e54bf25764c5cf0fec1cdf78d5e77e159d9260171'),
+        ('nba-players-20161012211755-original.html', '18ecf2ca1e1852e8e210fb782d6484484aab45aaa155db00cca2f8288f4bbda4'),
+    )
+    names: dict[int, set[str]] = {}
+
+    class PlayerLinks(HTMLParser):
+        def handle_starttag(self, tag, attributes):
+            attrs = dict(attributes)
+            if tag != 'a' or 'playerList' not in (attrs.get('class') or '').split():
+                return
+            link = re.fullmatch(r'/players/[^?#]+/(\d+)', attrs.get('href') or '')
+            title = (attrs.get('title') or '').strip()
+            if link and title and int(link[1]) in unresolved:
+                names.setdefault(int(link[1]), set()).add(title.title() if title.isupper() else title)
+
+    for filename, digest in directories:
+        path = folder / filename
+        if not path.is_file():
+            continue
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError(f'reviewed official NBA player directory bytes have changed: {filename}')
+        PlayerLinks().feed(raw.decode('utf-8'))
+    candidates = {pid: next(iter(labels)) for pid, labels in names.items() if len(labels) == 1}
+    if not candidates:
+        return {}
+    fixtures = c.execute('''SELECT person_id,game_id,team_id FROM raw.nba_gap_person
+        WHERE person_id IN (SELECT unnest(?))''', [list(candidates)]).fetchall()
+    matches: dict[int, set[tuple[str, int, str]]] = {}
+    for pid, game, team in fixtures:
+        matches.setdefault(pid, set()).add((game, team, candidates[pid]))
+    return matches
+
+
 def repair_foreign_names(c) -> None:
     """Resolve previously unnamed NBA IDs using exact same-side matches across the cached fixtures."""
     from load_espn import norm, verified_names_by_stat_line
 
     people = dict(c.execute('SELECT person_id, display_name FROM core.dim_person').fetchall())
     unresolved = {pid for pid, name in people.items() if (name or '').startswith('Unnamed player (')}
+    confirmed_spellings = {
+        1962937476: ('Maxin Esteban', 'Màxim Esteban', 'maxim-esteban-spelling-receipt.json',
+                     '02e0ab96e8ee495ce2c8d88ea5ab41d48ee03e2149a0ac4656b704cdecc17aa1', 'fc_barcelona_annual_report'),
+        1962937541: ('Ofek Azital', 'Ofek Avital', 'ofek-avital-israel-basketball-2016-17.html',
+                     'c84b2b78ed1430350cd33e9c332898ab8d4295a2d72fd4ba83ba97d79d8bfc2b', 'israeli_basketball_league_roster'),
+    }
+    unresolved.update(pid for pid, (reported, *_) in confirmed_spellings.items() if people.get(pid) == reported)
     if not unresolved:
         return
+    exact_profiles = archived_player_names(c, unresolved)
     evidence = []
     for file in sorted((CACHE / 'boxscoretraditionalv3').glob('*.json')):
         box = json.loads(file.read_text()).get('boxScoreTraditional') or {}
@@ -387,6 +434,18 @@ def repair_foreign_names(c) -> None:
             evidence.append((file.stem, side, team.get('teamId'), players, pids))
     resolutions: dict[int, dict[str, set[tuple[str, int, str]]]] = {}
     known = {pid: name for pid, name in people.items() if name and pid not in unresolved}
+    for pid, witnesses in exact_profiles.items():
+        known[pid] = next(iter(witnesses))[2]
+        resolutions[pid] = {norm(known[pid]): witnesses}
+        unresolved.remove(pid)
+    spelling_receipts = []
+    for pid, (reported, corrected, filename, digest, source) in confirmed_spellings.items():
+        spelling = CACHE.parent / 'nba-placeholders-legacy' / filename
+        if pid in exact_profiles and known[pid] == reported and spelling.is_file():
+            if hashlib.sha256(spelling.read_bytes()).hexdigest() != digest:
+                raise ValueError(f'reviewed spelling evidence has changed: {filename}')
+            known[pid] = corrected
+            spelling_receipts.extend((pid, game, team, corrected, source) for game, team, _ in exact_profiles[pid])
     while unresolved:
         proposals: dict[int, dict[str, set[tuple[str, int, str]]]] = {}
         for game, side, tid, players, pids in evidence:
@@ -413,12 +472,15 @@ def repair_foreign_names(c) -> None:
             c.execute('UPDATE core.dim_person SET display_name = ? WHERE person_id = ?', [known[pid], pid])
             c.execute('UPDATE raw.nba_gap_person SET display_name = ? WHERE person_id = ?', [known[pid], pid])
             c.executemany('INSERT OR IGNORE INTO audit.nba_gap_person_name_receipt VALUES (?,?,?,?,?,now())',
-                          [(pid, game, tid, name, 'espn_same_fixture') for game, tid, name in sorted(next(iter(candidate.values())))])
+                          [(pid, game, tid, name, 'archived_nba_player_id' if pid in exact_profiles else 'espn_same_fixture')
+                           for game, tid, name in sorted(next(iter(candidate.values())))])
+        if spelling_receipts:
+            c.executemany('INSERT OR IGNORE INTO audit.nba_gap_person_name_receipt VALUES (?,?,?,?,?,now())', spelling_receipts)
         c.execute('COMMIT')
     except BaseException:
         c.execute('ROLLBACK')
         raise
-    print('NBA.com blank player names resolved from ESPN:', len(resolutions), flush=True)
+    print('NBA.com blank player names resolved from verified fixtures and profiles:', len(resolutions), flush=True)
 
 
 def log(c, domain: str, attempts: list[tuple]) -> None:

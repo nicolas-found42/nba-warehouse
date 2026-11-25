@@ -54,6 +54,11 @@ FROM failed GROUP BY ALL;
 CREATE OR REPLACE TEMP TABLE g AS
 SELECT game_id, season_start, season_year, season_type, result_status, league_era FROM core.dim_game;
 
+CREATE OR REPLACE TEMP TABLE lineup_shape AS
+SELECT game_id,count(*) AS teams,count_if(players=5) AS full_teams FROM (
+    SELECT game_id,team_id,count(*) AS players FROM core.fact_starting_lineup GROUP BY 1,2
+) GROUP BY 1;
+
 CREATE OR REPLACE TEMP TABLE have AS
 SELECT 'final_score' AS domain, game_id FROM core.fact_game_result
 UNION ALL SELECT 'period_scores', game_id FROM core.fact_game_period_score GROUP BY game_id
@@ -61,13 +66,13 @@ UNION ALL SELECT 'team_box', game_id FROM core.fact_team_game_stats GROUP BY gam
 UNION ALL SELECT 'player_box', game_id FROM core.fact_player_game_stats GROUP BY game_id HAVING count(DISTINCT team_id) = 2
 UNION ALL SELECT 'play_by_play', game_id FROM core.fact_play_event GROUP BY game_id
 UNION ALL SELECT 'shot_chart', game_id FROM core.fact_shot GROUP BY game_id
-UNION ALL SELECT 'starting_lineup', game_id FROM core.fact_starting_lineup GROUP BY game_id HAVING count(DISTINCT team_id) = 2
+UNION ALL SELECT 'starting_lineup', game_id FROM lineup_shape WHERE teams = 2 AND full_teams = 2
 UNION ALL SELECT 'officials', game_id FROM core.fact_game_official GROUP BY game_id HAVING count(*) >= 3;
 
 CREATE OR REPLACE TEMP TABLE partial AS
 SELECT 'team_box' AS domain, game_id FROM core.fact_team_game_stats GROUP BY game_id HAVING count(*) = 1
 UNION ALL SELECT 'player_box', game_id FROM core.fact_player_game_stats GROUP BY game_id HAVING count(DISTINCT team_id) = 1
-UNION ALL SELECT 'starting_lineup', game_id FROM core.fact_starting_lineup GROUP BY game_id HAVING count(DISTINCT team_id) = 1
+UNION ALL SELECT 'starting_lineup', game_id FROM lineup_shape WHERE teams <> 2 OR full_teams <> 2
 UNION ALL SELECT 'officials', game_id FROM core.fact_game_official GROUP BY game_id HAVING count(*) < 3;
 
 CREATE OR REPLACE TEMP TABLE disputed AS
@@ -84,7 +89,7 @@ SELECT g.game_id, g.season_year, g.season_type, d.domain,
     WHEN h.game_id IS NOT NULL THEN 'present'
     WHEN g.result_status <> 'final' AND d.domain <> 'final_score' THEN 'not_applicable'
     WHEN g.season_start < t.first_season THEN 'not_tracked'
-    WHEN p.game_id IS NOT NULL AND d.domain = 'officials' AND coalesce(a.sources_failed, 0) >= 2 THEN 'source_unavailable'
+    WHEN p.game_id IS NOT NULL AND d.domain IN ('officials','starting_lineup') AND coalesce(a.sources_failed, 0) >= 2 THEN 'source_unavailable'
     WHEN p.game_id IS NOT NULL THEN 'partial'
     WHEN x.reviewed_conflict THEN 'disputed'
     WHEN x.game_id IS NOT NULL AND coalesce(a.sources_failed, 0) < 2 THEN 'disputed'
