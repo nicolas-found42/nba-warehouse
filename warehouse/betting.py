@@ -83,23 +83,58 @@ SELECT * FROM (VALUES
 ) AS verified(event_id, quote_day, matchup, game_id);
 
 CREATE OR REPLACE TEMP TABLE reviewed_pinnacle_detail AS
-SELECT v.game_id,v.matchup,b.snapshot_ts
-FROM reviewed_pinnacle_fixture v JOIN raw.bridge_game_market_odds b
-  ON b.matchup=v.matchup AND b.snapshot_ts::DATE=v.quote_day
-GROUP BY ALL HAVING count(DISTINCT b.game_id)=1 AND bool_and(b.game_id=v.game_id);
+WITH exact_event_day AS (
+    SELECT v.game_id,v.matchup,b.snapshot_ts
+    FROM reviewed_pinnacle_fixture v JOIN raw.bridge_game_market_odds b
+      ON b.matchup=v.matchup AND b.snapshot_ts::DATE=v.quote_day
+    GROUP BY ALL HAVING count(DISTINCT b.game_id)=1 AND bool_and(b.game_id=v.game_id)
+), pinned_openers AS (
+    SELECT v.game_id,v.matchup,b.snapshot_ts
+    FROM reviewed_pinnacle_fixture v JOIN raw.bridge_game_market_odds b
+      ON b.matchup=v.matchup AND b.snapshot_ts>=v.quote_day AND b.snapshot_ts<TIMESTAMP '2025-10-01'
+    WHERE v.game_id IN ('0022500001','0022500002')
+    GROUP BY ALL HAVING count(DISTINCT b.game_id)=1 AND bool_and(b.game_id=v.game_id
+        AND b.match_method='pinned_exact_event_identity' AND b.match_confidence=1)
+), early_payloads AS (
+    SELECT matchup,snapshot_ts,list(struct_pack(market:=market,selection:=selection,odds:=odds)
+           ORDER BY market,selection,odds) AS quotes
+    FROM raw.fact_game_market_odds WHERE matchup='Golden State Warriors vs Los Angeles Lakers'
+      AND is_preseason=false AND snapshot_ts>=TIMESTAMP '2025-09-14' AND snapshot_ts<TIMESTAMP '2025-10-01'
+    GROUP BY 1,2 HAVING count(*)=50
+), confirmed_repeats AS (
+    SELECT DISTINCT p.game_id,x.matchup,x.snapshot_ts FROM early_payloads x
+    JOIN early_payloads seed ON seed.quotes=x.quotes
+    JOIN pinned_openers p ON p.matchup=seed.matchup AND p.snapshot_ts=seed.snapshot_ts
+)
+SELECT * FROM exact_event_day
+UNION SELECT * FROM pinned_openers
+UNION SELECT * FROM confirmed_repeats;
+
+-- Each exact snapshot is corroborated by dated book lines for both possible fixtures and a distinct alternate event.
+CREATE OR REPLACE TEMP TABLE reviewed_pinnacle_key AS
+SELECT * FROM (VALUES
+    ('1618981544',TIMESTAMP '2025-11-10 22:08:06','Cleveland Cavaliers vs Miami Heat','0022500201',1610612739,1610612748),
+    ('1621316242',TIMESTAMP '2025-12-21 19:32:45','Chicago Bulls vs Atlanta Hawks','0022500396',1610612741,1610612737),
+    ('1622988890',TIMESTAMP '2026-01-31 23:20:13','Minnesota Timberwolves vs Memphis Grizzlies','0022500700',1610612750,1610612763),
+    ('1626305622',TIMESTAMP '2026-03-17 20:33:35','Detroit Pistons vs Washington Wizards','0022500993',1610612765,1610612764),
+    ('1626840278',TIMESTAMP '2026-03-25 19:44:31','Miami Heat vs Cleveland Cavaliers','0022501055',1610612748,1610612739)
+) AS reviewed(event_id,snapshot_ts,matchup,game_id,away_id,home_id);
 
 CREATE OR REPLACE TEMP TABLE cand AS
 SELECT k.source, k.source_key, k.snapshot_ts, k.n1, k.n2, k.is_preseason, s.game_id, s.tip_est,
        k.team1_id = s.away_team_id AND k.team2_id = s.home_team_id AS away_home_order_agrees,
-       s.game_id = coalesce(m.game_id, d.game_id) AS reviewed_fixture_agrees
+       s.game_id = coalesce(r.game_id, m.game_id, d.game_id) AS reviewed_fixture_agrees
 FROM keyed_team k LEFT JOIN reviewed_pinnacle_fixture m
   ON k.source='main_line' AND regexp_extract(rtrim(k.source_key,'/'), '/([0-9]+)$', 1)=m.event_id
  AND k.snapshot_ts::DATE=m.quote_day
 LEFT JOIN reviewed_pinnacle_detail d ON k.source='market_odds' AND d.matchup=k.source_key AND d.snapshot_ts=k.snapshot_ts
+LEFT JOIN reviewed_pinnacle_key r ON k.snapshot_ts=r.snapshot_ts AND k.team1_id=r.away_id AND k.team2_id=r.home_id
+ AND ((k.source='main_line' AND regexp_extract(rtrim(k.source_key,'/'), '/([0-9]+)$', 1)=r.event_id)
+      OR (k.source='market_odds' AND k.source_key=r.matchup))
 JOIN game_slot s
   ON s.t_lo = least(k.team1_id, k.team2_id) AND s.t_hi = greatest(k.team1_id, k.team2_id)
  AND (k.is_preseason IS NULL OR k.is_preseason = (s.season_type = 'Preseason'))
- AND (s.game_id = coalesce(m.game_id, d.game_id)
+ AND (s.game_id = coalesce(r.game_id, m.game_id, d.game_id)
       OR s.tip_est BETWEEN k.snapshot_ts - INTERVAL 6 HOUR AND k.snapshot_ts + INTERVAL 60 HOUR);
 
 CREATE OR REPLACE TEMP TABLE our_match AS

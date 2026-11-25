@@ -165,7 +165,7 @@ DOMAINS: list[Domain] = [
            fks={'person_id': 'core.dim_person(person_id)', 'team_id': 'core.dim_team(team_id)',
                 'season_year': 'core.dim_season(season_year)'},
            not_null=['person_id', 'team_id', 'season_year']),
-    Domain('fact_starting_lineup', 'raw.fact_starting_lineup_player (1996-) + box-score starting positions where no lineup row exists + Kaggle eoinamoore starters for games neither has',
+    Domain('fact_starting_lineup', 'NBA starter facts and verified box scores, with other named or inferred starter facts filling gaps',
            '''WITH high_source AS (SELECT game_id, team_id, person_id, starting_position, 'nba_starting_lineup' AS source FROM raw.fact_starting_lineup_player
               UNION ALL
               SELECT game_id, team_id, person_id, starting_position, 'box_score_starting_position' FROM core.fact_player_game_stats
@@ -201,15 +201,32 @@ DOMAINS: list[Domain] = [
                 JOIN core.fact_player_game_stats p USING (game_id,team_id,person_id)
                 WHERE p.participation_status='played'
                 QUALIFY count(DISTINCT s.person_id) OVER (PARTITION BY s.game_id,s.team_id) = 5),
+              reviewed AS (
+                SELECT game_id,team_id,person_id,starting_position,source FROM raw.verified_starting_lineup
+                QUALIFY count(*) OVER (PARTITION BY game_id,team_id) = 5
+                  AND count(DISTINCT person_id) OVER (PARTITION BY game_id,team_id) = 5
+                  AND count(DISTINCT (source_url,sha256)) OVER (PARTITION BY game_id,team_id) = 1),
+              reviewed_replacements AS (
+                SELECT * FROM reviewed r WHERE source='nba_official_scorer_report' OR (
+                    (r.game_id,r.team_id) NOT IN (SELECT game_id,team_id FROM high_source
+                       WHERE (game_id,team_id) NOT IN (SELECT game_id,team_id FROM invalid_high_source))
+                    AND (r.game_id,r.team_id) NOT IN (SELECT game_id,team_id FROM verified_nba_flags)
+                    AND (r.game_id,r.team_id) NOT IN (SELECT game_id,team_id FROM raw.wayback_starter
+                       GROUP BY 1,2 HAVING count(DISTINCT person_id)=5)
+                    AND (source='nba_com_archive_verified' OR (r.game_id,r.team_id) NOT IN (
+                        SELECT game_id,team_id FROM raw.captured_club_starter UNION ALL SELECT game_id,team_id FROM press_starters)))),
               hi AS (
                 SELECT * FROM high_source WHERE (game_id,team_id) NOT IN (
                   SELECT p.game_id,p.team_id FROM press_starters p JOIN invalid_high_source b USING (game_id,team_id)
-                  UNION ALL SELECT game_id,team_id FROM verified_nba_flags)
+                  UNION ALL SELECT game_id,team_id FROM verified_nba_flags
+                  UNION ALL SELECT game_id,team_id FROM reviewed_replacements)
                 UNION ALL SELECT f.game_id,f.team_id,f.person_id,p.starting_position,'nba_llimllib'
                 FROM verified_nba_flags f LEFT JOIN (
                   SELECT game_id,team_id,person_id,min(starting_position) AS starting_position
                   FROM high_source GROUP BY 1,2,3 HAVING count(DISTINCT starting_position) = 1
-                ) p USING (game_id,team_id,person_id))
+                ) p USING (game_id,team_id,person_id)
+                WHERE (f.game_id,f.team_id) NOT IN (SELECT game_id,team_id FROM reviewed_replacements)
+                UNION ALL SELECT * FROM reviewed_replacements)
               SELECT * FROM hi
               UNION ALL  -- archived NBA.com box pages (load_wayback_nba.py): only teams no source above names starters for
               SELECT game_id, team_id, person_id, NULL, 'nba_com_archive' FROM raw.wayback_starter
@@ -423,6 +440,9 @@ official_report AS (
 
 
 def promote(c, d: Domain) -> tuple[int, int, int, int]:
+    if d.name == 'fact_starting_lineup':
+        from load_verified_lineups import create_table
+        create_table(c)
     c.execute(f'CREATE OR REPLACE TEMP TABLE cand AS SELECT row_number() OVER () AS _row, * FROM ({d.select})')
     cols = [r[0] for r in c.execute("SELECT column_name FROM duckdb_columns() WHERE table_name='cand' AND column_name <> '_row' ORDER BY column_index").fetchall()]
     reasons = []

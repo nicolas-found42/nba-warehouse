@@ -133,6 +133,8 @@ uv run --no-project --with duckdb==2.0.0 python warehouse/betting.py
 
 Official PDF capture uses Poppler's `pdftotext`. `indexed-pdfs` uses the downloaded seasonal mirror tables to
 find original PDF filenames. `archive-pdfs --index PATH` accepts a local official and Wayback PDF catalogue.
+`audit-archive --index PATH` checks which catalogue filenames have parsed rows. `cached` replays downloaded
+originals, mirror copies and archive captures within the selected date range.
 Historical and daily source coverage is documented in the
 [research note](docs/research/gap-sources.md).
 

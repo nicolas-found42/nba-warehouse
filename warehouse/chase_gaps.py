@@ -187,6 +187,8 @@ def finalize(warehouse: Path) -> None:
         load_schedule_releases(c)
         from load_nba_scorer_crews import load as load_scorer_crews
         load_scorer_crews(c)
+        from load_verified_lineups import load as load_verified_lineups
+        load_verified_lineups(c)
         for d in pd.DOMAINS:
             if d.name in ('fact_starting_lineup', 'dim_official', 'fact_game_official'):
                 c.execute('DELETE FROM audit.domain_disposition WHERE domain = ?', [d.name])

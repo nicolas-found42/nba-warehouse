@@ -89,7 +89,7 @@ SELECT g.game_id, g.season_year, g.season_type, d.domain,
     WHEN h.game_id IS NOT NULL THEN 'present'
     WHEN g.result_status <> 'final' AND d.domain <> 'final_score' THEN 'not_applicable'
     WHEN g.season_start < t.first_season THEN 'not_tracked'
-    WHEN p.game_id IS NOT NULL AND d.domain IN ('officials','starting_lineup') AND coalesce(a.sources_failed, 0) >= 2 THEN 'source_unavailable'
+    WHEN p.game_id IS NOT NULL AND coalesce(a.sources_failed, 0) >= 2 THEN 'source_unavailable'
     WHEN p.game_id IS NOT NULL THEN 'partial'
     WHEN x.reviewed_conflict THEN 'disputed'
     WHEN x.game_id IS NOT NULL AND coalesce(a.sources_failed, 0) < 2 THEN 'disputed'

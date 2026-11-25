@@ -33,6 +33,7 @@ LEGACY_MINUTE_CHANGE = dt.datetime(2025, 12, 19, 16, tzinfo=ET)
 QUARTER_HOUR = dt.datetime(2025, 12, 22, 9, tzinfo=ET)
 STATUSES = {'Out', 'Doubtful', 'Questionable', 'Probable', 'Available'}
 TEAM_NOTES = {'NOT YET SUBMITTED', 'ALL PLAYERS AVAILABLE'}
+REPORT_FILE = re.compile(r'Injury-Report_(\d{4}-\d{2}-\d{2})_\d{2}(?:_\d{2})?[AP]M\.pdf')
 ARCHIVE_REPLAY_LOCK = Lock()
 
 
@@ -166,18 +167,20 @@ def download(url: str, dest: Path, recent: bool = False) -> None:
         time.sleep(1)
 
 
-def capture_days(days, now: dt.datetime) -> list[Path]:
+def capture_days(days, now: dt.datetime, workers: int = 1) -> list[Path]:
+    def capture(slot):
+        stamp, name = slot
+        target = CACHE / 'pdf' / name
+        download(NBA + name, target, recent=stamp > now - dt.timedelta(hours=2))
+        return target if target.is_file() else None
+
     saved = []
-    for day in sorted(set(days)):
-        prior = len(saved)
-        for stamp, name in slots(day):
-            if stamp > now:
-                break
-            target = CACHE / 'pdf' / name
-            download(NBA + name, target, recent=stamp > now - dt.timedelta(hours=2))
-            if target.is_file():
-                saved.append(target)
-        print(f'NBA injury report capture {day}: {len(saved) - prior} PDFs', flush=True)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for day in sorted(set(days)):
+            batch = (slot for slot in slots(day) if slot[0] <= now)
+            reports = [path for path in pool.map(capture, batch) if path is not None]
+            saved.extend(reports)
+            print(f'NBA injury report capture {day}: {len(reports)} PDFs', flush=True)
     return saved
 
 
@@ -291,12 +294,12 @@ def indexed_pdfs(warehouse: Path, start: dt.date, end: dt.date, cached_only: boo
     return held == 0 and (cached_only or missing == 0)
 
 
-def archive_pdfs(warehouse: Path, catalog: Path, start: dt.date, end: dt.date) -> bool:
+def archive_entries(catalog: Path, start: dt.date, end: dt.date) -> dict:
     entries = {}
     with catalog.open(newline='') as source:
         for row in csv.DictReader(source):
             name = row['filename']
-            m = re.fullmatch(r'Injury-Report_(\d{4}-\d{2}-\d{2})_\d{2}(?:_\d{2})?[AP]M\.pdf', name)
+            m = REPORT_FILE.fullmatch(name)
             if not m:
                 continue
             day = dt.date.fromisoformat(m[1])
@@ -305,6 +308,53 @@ def archive_pdfs(warehouse: Path, catalog: Path, start: dt.date, end: dt.date) -
                 if capture and not re.fullmatch(r'\d{14}', capture):
                     raise ValueError(f'invalid archive capture time for {name}')
                 entries[name] = (day, capture, int(row['ending_season']), bool(row.get('mirror_url')))
+    return entries
+
+
+def audit_archive(warehouse: Path, catalog: Path, start: dt.date, end: dt.date) -> bool:
+    entries = archive_entries(catalog, start, end)
+    with connect(warehouse, read_only=True) as c:
+        found = {row[0] for row in c.execute(r'''SELECT DISTINCT regexp_extract(source_url, '[^/]+$')
+            FROM raw.nba_injury_report WHERE starts_with(source_url, ?)
+              AND timezone('America/New_York',report_time)::DATE =
+                  try_cast(regexp_extract(source_url, 'Injury-Report_(\d{4}-\d{2}-\d{2})',1) AS DATE)''', [NBA]).fetchall()}
+    missing = entries.keys() - found
+    for name in sorted(missing):
+        print(f'Missing published PDF from catalogue: {name}', flush=True)
+    print(f'Verified {len(entries) - len(missing)} of {len(entries)} catalogued PDF filenames in the warehouse', flush=True)
+    return not missing
+
+
+def replay_cached_pdfs(warehouse: Path, start: dt.date, end: dt.date) -> bool:
+    paths = [*CACHE.glob('pdf/*.pdf'), *CACHE.glob('pdf-mirror/*/*.pdf'), *CACHE.glob('pdf-wayback/*/*.pdf')]
+    dates = []
+    for path in paths:
+        match = REPORT_FILE.fullmatch(path.name)
+        if match and start <= (day := dt.date.fromisoformat(match[1])) <= end:
+            dates.append((day, path))
+    held = total = 0
+    for (year, month), batch in groupby(sorted(dates), key=lambda item: (item[0].year, item[0].month)):
+        reports = {}
+        for day, path in batch:
+            try:
+                document = read_pdf(path)
+                if document[1].date() != day:
+                    raise ValueError(f'printed report date {document[1].date()} disagrees with the filename')
+                reports[path] = document
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                held += 1
+                print(f'Held cached injury report {retrieval_url(path)}: {exc}', flush=True)
+        if reports:
+            with warehouse_lock(), connect(warehouse) as c:
+                publish(c, reports)
+            total += len(reports)
+            print(f'Replayed {len(reports)} cached PDF copies for {year}-{month:02}', flush=True)
+    print(f'Replayed {total} cached PDF copies. {held} require another check.', flush=True)
+    return held == 0
+
+
+def archive_pdfs(warehouse: Path, catalog: Path, start: dt.date, end: dt.date) -> bool:
+    entries = archive_entries(catalog, start, end)
     ordered = sorted(entries.items(), key=lambda item: (item[1][0], item[0]), reverse=True)
     imported = failures = 0
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -359,12 +409,12 @@ def load_archive_entry(entry):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=['mirror', 'daily', 'backfill', 'cached', 'rosters', 'indexed-pdfs', 'archive-pdfs'])
+    parser.add_argument('mode', choices=['mirror', 'daily', 'backfill', 'cached', 'rosters', 'indexed-pdfs', 'archive-pdfs', 'audit-archive'])
     parser.add_argument('--warehouse', type=Path, default=DEFAULT_OUT)
     parser.add_argument('--from-date', type=dt.date.fromisoformat, default=FIRST_DATE)
     parser.add_argument('--through', type=dt.date.fromisoformat)
     parser.add_argument('--cached-only', action='store_true', help='indexed-pdfs: import downloaded files without fetching')
-    parser.add_argument('--index', type=Path, help='archive-pdfs: local official and Wayback PDF URL index')
+    parser.add_argument('--index', type=Path, help='archive-pdfs and audit-archive: local official and Wayback PDF URL index')
     args = parser.parse_args()
     now = dt.datetime.now(ET)
     mirrors = []
@@ -385,29 +435,30 @@ def main() -> None:
     elif args.mode == 'rosters':
         reports = {}
         pregame = pregame_sources.capture(now, history=True)
+    elif args.mode == 'cached':
+        raise SystemExit(0 if replay_cached_pdfs(args.warehouse, args.from_date, args.through or now.date()) else 1)
     elif args.mode == 'indexed-pdfs':
         raise SystemExit(0 if indexed_pdfs(args.warehouse, args.from_date, args.through or now.date(), args.cached_only) else 1)
-    elif args.mode == 'archive-pdfs':
+    elif args.mode in ('archive-pdfs', 'audit-archive'):
         if args.index is None:
-            parser.error('archive-pdfs requires --index')
-        raise SystemExit(0 if archive_pdfs(args.warehouse, args.index, args.from_date, args.through or now.date()) else 1)
+            parser.error(f'{args.mode} requires --index')
+        operation = archive_pdfs if args.mode == 'archive-pdfs' else audit_archive
+        raise SystemExit(0 if operation(args.warehouse, args.index, args.from_date, args.through or now.date()) else 1)
     elif args.mode == 'backfill':
         with connect(args.warehouse, read_only=True) as c:
-            dates = c.execute('''SELECT DISTINCT game_date FROM core.dim_game WHERE season_type IN ('Regular','Playoffs','PlayIn','Cup')
+            dates = c.execute('''SELECT DISTINCT game_date FROM core.dim_game WHERE season_type IN ('Preseason','Regular','Playoffs','PlayIn','Cup')
                 AND game_date BETWEEN ? AND ?''', [args.from_date, args.through or now.date()]).fetchall()
         # Reports also include the following day's games.
         days = {day for (game_day,) in dates for day in (game_day, game_day - dt.timedelta(days=1)) if day >= args.from_date}
         total = 0
         for (year, month), batch in groupby(sorted(days), key=lambda day: (day.year, day.month)):
-            reports = {path: read_pdf(path) for path in capture_days(batch, now)}
+            reports = {path: read_pdf(path) for path in capture_days(batch, now, workers=3)}
             with warehouse_lock(), connect(args.warehouse) as c:
                 publish(c, reports)
             total += len(reports)
             print(f'Published {len(reports)} injury reports for {year}-{month:02}', flush=True)
         print(f'Published {total} NBA injury reports in the requested range', flush=True)
         return
-    else:
-        reports = {path: read_pdf(path) for path in sorted((CACHE / 'pdf').glob('*.pdf'))}
     with warehouse_lock(), connect(args.warehouse) as c:
         publish(c, reports, mirrors, pregame)
     print(f'Published source data from {len(reports)} NBA PDFs and {len(mirrors)} season files', flush=True)

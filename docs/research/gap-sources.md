@@ -217,9 +217,21 @@ access restrictions establish only that the requested route could not be checked
   [Archived NBA original URL](http://nba.com/games/20151017/ORLFLA/gameinfo.html)
 - The old lineup feed reported more than five starters on many team sides. The warehouse replaces an invalid set
   with the NBA’s explicit starter flags only when exactly five distinct members match played rows for that game
-  and team. It preserves positions with a single recorded value. `audit.starting_lineup_shape` now shows exact named
-  fives for both teams in 40,283 games. The original feed and residual incomplete shapes remain visible.
+  and team. It preserves positions with a single recorded value. `audit.starting_lineup_shape` records the exact named
+  fives, incomplete team shapes and counts. The original feed remains available.
   [NBA starter-flag mirror example](https://basketball-data.billmill.org/nba/stats/player_game_status/season=2019/data.parquet)
+- The NBA’s archived January 12, 2007 box, five NBA final scorer reports and seven Basketball-Reference boxes with
+  matching ESPN starter flags resolve 13 remaining malformed fives. Each of these teams had a starter with a sub-minute
+  appearance that the old feed rounded to zero. The receipt names the five players in printed order, with positions
+  when published and the underlying capture digest. The five NBA gamebooks are verified text extracts.
+  [Golden State original box](https://web.archive.org/web/20070115211315/http://www.nba.com:80/games/20070112/MIAGSW/boxscore.html)
+  [Utah–Clippers scorer report](https://statsdmz.nba.com/pdfs/20170415/20170415_UTALAC_book.pdf)
+  [Minnesota original starter section](https://www.basketball-reference.com/boxscores/200405230MIN.html)
+- The 34 remaining lineup gaps and 26 incomplete or missing officiating crews each have at least two independent failed
+  sources with notes in `audit.gap_disposition`. There are 40,296 games with two exact five-player lineups.
+  For partly documented player boxes the published team facts and club
+  scoring receipts remain intact. Their unfilled side is likewise labelled `source_unavailable` after two independent
+  failures.
 - Ten 2026–27 NBA final books supply 30 exact officiating assignments. The source receipt retains the published
   order, names and uniform numbers. Five officials have verified league identities and persistent warehouse IDs.
   Andy Nagy retains his existing NBA ID. Current-season uniform numbers stay on the assignments because historical
@@ -298,6 +310,17 @@ access restrictions establish only that the requested route could not be checked
   legacy source times remain excluded from strict pregame eligibility.
   [NBA opening schedule](https://pr.nba.com/2025-26-nba-regular-season-schedule)
   [Miami–Chicago reschedule](https://pr.nba.com/heat-bulls-schedule-adjustments)
+- The opening-night evidence resolves another 1,550 detailed Pinnacle quotes. Nineteen September snapshots have an exact
+  event pin in the original crosswalk. Twelve additional Golden State–Lakers snapshots repeat a confirmed 50-quote payload
+  exactly. Three Houston–Oklahoma City snapshots with a changed payload await an independent fixture citation.
+  [NBA opening schedule](https://pr.nba.com/2025-26-nba-regular-season-schedule)
+- Five repeated matchups have distinct historical spread or total lines for the two possible dates and a separate Pinnacle
+  event already matched to the alternate fixture. The review applies to the five exact original snapshot keys.
+  [Cleveland–Miami, November 10](https://www.fanduel.com/research/nba-predictions-odds-11-10-2025)
+  [Chicago–Atlanta, December 21](https://www.fanduel.com/research/nba-predictions-odds-12-21-2025)
+  [Minnesota–Memphis, January 31](https://www.fanduel.com/research/nba-predictions-odds-1-31-2026)
+  [Detroit–Washington, March 17](https://www.fanduel.com/research/nba-predictions-odds-3-17-2026)
+  [Miami–Cleveland, March 25](https://www.fanduel.com/research/nba-predictions-odds-3-25-2026)
   [Stars–Stripes contemporaneous preview](https://www.si.com/betting/usa-stars-vs-usa-stripes-odds-spread-total-and-prediction-for-2026-nba-all-star-game)
 
 - Billmill serves copies of the original NBA PDFs, including the first 2018 report and samples through the
@@ -310,6 +333,14 @@ access restrictions establish only that the requested route could not be checked
   [Example Wayback PDF index](https://web.archive.org/cdx/search/cdx?url=ak-static.cms.nba.com%2Freferee%2Finjury%2FInjury-Report_2025-12%2A&output=json&filter=statuscode%3A200&collapse=urlkey&fl=timestamp%2Coriginal%2Cstatuscode&limit=20)
   [Final hourly filename example](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2025-12-22_08AM.pdf)
   [First minute-qualified example](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2025-12-22_09_00AM.pdf)
+- The NBA index, Billmill's 2026–27 data and archived NBA index pages identify 520 October–November 2026 filenames.
+  Quarter-hour slots on many days still need the direct NBA capture. The July archive names 77 Summer League files, all
+  recovered. An October 1 archive copy labelled 12:45 p.m. prints a 12:56 p.m. Eastern timestamp. The warehouse keeps
+  the original filename and retrieval route and uses the printed time.
+  [Current NBA index](https://www.nba.com/players/injury-report)
+  [Archived October index](https://web.archive.org/web/20261024021942/https://official.nba.com/nba-injury-report-2026-27-season/)
+  [July original PDF](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-07-08_12_45PM.pdf)
+  [October 1 original replay](https://web.archive.org/web/20261002063922id_/https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-10-01_12_45PM.pdf)
 
 - The NBA PDF cache keeps printed timestamps, statuses and notices. The season mirror covers 2019–2027 and contains
   selected pregame snapshots. Strict pregame queries corroborate identities with the roster available at the cutoff.
