@@ -78,6 +78,9 @@ def export_inputs(wh: Path, work: Path) -> tuple[Path, Path, Path]:
     # fact_game is a view in the historical contract
     c.execute('''CREATE VIEW h.nba.fact_game AS SELECT g.*, r.home_score, r.away_score, r.winner_team_id, r.is_overtime
                  FROM h.nba.dim_game g LEFT JOIN h.nba.fact_game_result r USING (game_id)''')
+    # the other core views only need their column shape (refresh_current_season.py compares shapes)
+    for (v,) in c.execute("SELECT view_name FROM duckdb_views() WHERE database_name='wh' AND schema_name='core' AND view_name <> 'fact_game'").fetchall():
+        c.execute(f'CREATE TABLE h.nba.{q(v)} AS SELECT * FROM wh.core.{q(v)} LIMIT 0')
     c.execute('DETACH h')
     c.execute(f'ATTACH {lit(str(prior))} AS p; CREATE SCHEMA p.audit')
     for t in ('result_for_local_review', 'verified_period_score', 'team_box_local_review'):
@@ -208,6 +211,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--warehouse', type=Path, default=DEFAULT_OUT)
     ap.add_argument('--cutoff', type=dt.date.fromisoformat, help='last completed Eastern date (default: yesterday ET)')
+    ap.add_argument('--force', action='store_true', help='rebuild even if the warehouse already covers the cutoff (re-verifies it)')
     a = ap.parse_args()
     now = dt.datetime.now(ET)
     cutoff = a.cutoff or (now.date() - dt.timedelta(days=1))
@@ -216,7 +220,7 @@ def main() -> int:
     c = duckdb.connect(str(a.warehouse), read_only=True)
     done = c.execute(f'SELECT cutoff FROM audit."{PREFIX}scope"').fetchone()[0]
     c.close()
-    if done >= cutoff:
+    if done >= cutoff and not a.force:
         print(f'already current through {done}')
         return 0
     try:

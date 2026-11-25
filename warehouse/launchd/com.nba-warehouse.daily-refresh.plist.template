@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nba-warehouse.daily-refresh</string>
+  <key>ProgramArguments</key>
+  <array><string>__REPO__/warehouse/launchd/run_refresh.sh</string></array>
+  <!-- 06:00 Eastern, retried at 09:00 and 12:00 if the publisher had not released yet.
+       launchd uses the Mac's local time zone; install.sh converts if the Mac is not on Eastern time. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>__H1__</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>__H2__</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>__H3__</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>StandardOutPath</key><string>__REPO__/data/refresh-reports/launchd.log</string>
+  <key>StandardErrorPath</key><string>__REPO__/data/refresh-reports/launchd.log</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>5</integer>
+</dict>
+</plist>

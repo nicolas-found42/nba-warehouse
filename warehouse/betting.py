@@ -21,13 +21,16 @@ from pathlib import Path
 from build_warehouse import DEFAULT_OUT, connect
 
 SQL = r"""
-CREATE OR REPLACE SCHEMA betting;
+DROP SCHEMA IF EXISTS betting CASCADE; CREATE SCHEMA betting;
 
 -- franchise names as they appear in odds feeds -> core team_id (current and historical names)
+-- a name is matched only to the team that carried it in the snapshot's season (e.g. the 1949-50 Denver Nuggets
+-- are a different franchise from today's); dim_team display names are a fallback with no date range
 CREATE OR REPLACE TEMP TABLE team_name AS
-SELECT DISTINCT lower(full_name) AS name, team_id FROM core.dim_team_version WHERE full_name IS NOT NULL
-UNION SELECT DISTINCT lower(display_name), team_id FROM core.dim_team WHERE display_name IS NOT NULL
-UNION SELECT 'los angeles clippers', 1610612746;   -- feed spelling of LA Clippers
+SELECT DISTINCT lower(full_name) AS name, team_id, valid_from, coalesce(valid_to, 9999) AS valid_to, 1 AS pref
+FROM core.dim_team_version WHERE full_name IS NOT NULL
+UNION SELECT DISTINCT lower(display_name), team_id, 0, 9999, 2 FROM core.dim_team WHERE display_name IS NOT NULL
+UNION SELECT 'los angeles clippers', 1610612746, 0, 9999, 1;   -- feed spelling of LA Clippers
 
 CREATE OR REPLACE TEMP TABLE game_slot AS
 SELECT g.game_id, g.season_year, g.season_type,
@@ -58,8 +61,12 @@ SELECT 'market_odds', row_number() OVER (), matchup, snapshot_ts,
 FROM raw.fact_game_market_odds;
 
 CREATE OR REPLACE TEMP TABLE keyed_team AS
-SELECT k.*, a.team_id AS team1_id, b.team_id AS team2_id
-FROM keyed k LEFT JOIN team_name a ON a.name = k.n1 LEFT JOIN team_name b ON b.name = k.n2;
+SELECT k.*,
+  (SELECT arg_min(t.team_id, t.pref) FROM team_name t WHERE t.name = k.n1
+     AND year(k.snapshot_ts - INTERVAL 6 MONTH) + 1 BETWEEN t.valid_from AND t.valid_to + 1) AS team1_id,
+  (SELECT arg_min(t.team_id, t.pref) FROM team_name t WHERE t.name = k.n2
+     AND year(k.snapshot_ts - INTERVAL 6 MONTH) + 1 BETWEEN t.valid_from AND t.valid_to + 1) AS team2_id
+FROM keyed k;
 
 CREATE OR REPLACE TEMP TABLE cand AS
 SELECT k.source, k.source_row, s.game_id, s.tip_est
@@ -75,7 +82,7 @@ SELECT k.source, k.source_row, k.team1_id, k.team2_id,
        CASE WHEN count(c.game_id) = 1 THEN any_value(c.game_id) END AS game_id,
        list(c.game_id ORDER BY c.tip_est) FILTER (WHERE c.game_id IS NOT NULL) AS candidate_game_ids
 FROM keyed_team k LEFT JOIN cand c USING (source, source_row)
-GROUP BY ALL;
+GROUP BY k.source, k.source_row, k.team1_id, k.team2_id;
 
 CREATE TABLE betting.main_line AS
 WITH m AS (SELECT *, row_number() OVER () AS source_row FROM raw.fact_game_main_line)
@@ -83,7 +90,9 @@ SELECT m.* EXCLUDE (source_row), o.match_status, o.game_id, o.candidate_game_ids
        b.game_id AS source_game_id, b.match_method AS source_match_method,
        (b.game_id IS NOT NULL AND o.game_id IS NOT NULL AND b.game_id <> o.game_id) AS disagrees_with_source
 FROM m JOIN our_match o ON o.source = 'main_line' AND o.source_row = m.source_row
-LEFT JOIN raw.bridge_game_main_line b USING (game_link);
+LEFT JOIN (SELECT game_link, CASE WHEN count(DISTINCT game_id) = 1 THEN any_value(game_id) END AS game_id,
+                  string_agg(DISTINCT match_method, ',') AS match_method
+           FROM raw.bridge_game_main_line GROUP BY 1) b USING (game_link);
 
 CREATE TABLE betting.market_odds AS
 WITH m AS (SELECT *, row_number() OVER () AS source_row FROM raw.fact_game_market_odds)
@@ -91,7 +100,9 @@ SELECT m.* EXCLUDE (source_row), o.team1_id, o.team2_id, o.match_status, o.game_
        b.game_id AS source_game_id, b.match_method AS source_match_method,
        (b.game_id IS NOT NULL AND o.game_id IS NOT NULL AND b.game_id <> o.game_id) AS disagrees_with_source
 FROM m JOIN our_match o ON o.source = 'market_odds' AND o.source_row = m.source_row
-LEFT JOIN (SELECT DISTINCT matchup, snapshot_ts, game_id, match_method FROM raw.bridge_game_market_odds) b
+LEFT JOIN (SELECT matchup, snapshot_ts, CASE WHEN count(DISTINCT game_id) = 1 THEN any_value(game_id) END AS game_id,
+                  string_agg(DISTINCT match_method, ',') AS match_method
+           FROM raw.bridge_game_market_odds GROUP BY 1, 2) b
   USING (matchup, snapshot_ts);
 
 CREATE TABLE betting.match_summary AS

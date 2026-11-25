@@ -42,20 +42,32 @@ def person_dimension(c) -> None:
                min(from_year) AS from_year, max(to_year) AS to_year
         FROM raw.dim_player WHERE player_id > 0 GROUP BY 1),
     cpi AS (
-        SELECT person_id, any_value(display_first_last) AS display_name, any_value(try_cast(birthdate AS DATE)) AS birth_date,
+        SELECT try_cast(person_id AS BIGINT) AS person_id, any_value(display_first_last) AS display_name,
+               any_value(try_cast(birthdate AS DATE)) AS birth_date,
                min(try_cast(from_year AS SMALLINT)) AS from_year, max(try_cast(to_year AS SMALLINT)) AS to_year,
-               any_value(player_code) AS player_code
-        FROM raw.common_player_info WHERE person_id > 0 GROUP BY 1)
+               any_value(playercode) AS player_code
+        FROM raw.common_player_info WHERE try_cast(person_id AS BIGINT) > 0 GROUP BY 1)
+    , other AS (  -- NBA-issued ids for people who never played: draftees, combine attendees, inactive-list names
+        SELECT person_id, arg_max(name, src) AS display_name FROM (
+            SELECT person_id, player_name AS name, 1 AS src FROM raw.fact_draft WHERE person_id > 0
+            UNION ALL SELECT normalized_player_id, player_name, 2 FROM raw.fact_draft_combine WHERE normalized_player_id > 0
+            UNION ALL SELECT person_id, trim(first_name || ' ' || last_name), 3 FROM raw.fact_inactive_player WHERE person_id > 0)
+        WHERE nullif(trim(name), '') IS NOT NULL GROUP BY 1)
+    SELECT person_id, display_name, birth_date, from_year, to_year, player_code FROM (
     SELECT coalesce(dp.person_id, cpi.person_id) AS person_id,
            coalesce(nullif(trim(dp.display_name), ''), nullif(trim(cpi.display_name), '')) AS display_name,
            coalesce(dp.birth_date, cpi.birth_date) AS birth_date,
            coalesce(dp.from_year, cpi.from_year)::SMALLINT AS from_year, coalesce(dp.to_year, cpi.to_year)::SMALLINT AS to_year,
            cpi.player_code
-    FROM dp FULL JOIN cpi USING (person_id)''')
+    FROM dp FULL JOIN cpi USING (person_id)
+    UNION ALL
+    SELECT person_id, display_name, NULL, NULL, NULL, NULL FROM other
+    WHERE person_id NOT IN (SELECT person_id FROM dp WHERE person_id IS NOT NULL)
+      AND person_id NOT IN (SELECT person_id FROM cpi WHERE person_id IS NOT NULL))''')
     c.execute('''INSERT INTO core.dim_person
         SELECT * FROM person_candidate p WHERE display_name IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM core.dim_person d WHERE d.person_id = p.person_id)''')
-    c.execute('''CREATE OR REPLACE TABLE core.person_source_id (
+    c.execute('''CREATE TABLE IF NOT EXISTS core.person_source_id (
         person_id BIGINT NOT NULL REFERENCES core.dim_person(person_id), source_system VARCHAR NOT NULL,
         source_key VARCHAR NOT NULL, source_key_kind VARCHAR, match_method VARCHAR, match_confidence DOUBLE,
         resolution_status VARCHAR, season_from INTEGER, season_to INTEGER,
@@ -67,6 +79,8 @@ def person_dimension(c) -> None:
         FROM raw.map_source_identity m
         WHERE entity_type = 'player' AND resolution_status IN ('matched', 'manually_resolved')
           AND try_cast(canonical_id AS BIGINT) IN (SELECT person_id FROM core.dim_person)
+          AND NOT EXISTS (SELECT 1 FROM core.person_source_id p WHERE p.source_system = m.source_system
+                          AND p.source_key = m.source_key AND p.person_id = try_cast(m.canonical_id AS BIGINT))
         ORDER BY 1, 2, 3, match_confidence DESC NULLS LAST''')
 
 

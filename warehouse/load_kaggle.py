@@ -25,7 +25,7 @@ from build_warehouse import DEFAULT_OUT, ROOT, connect, lit, q
 
 KAGGLE = ROOT / 'data' / 'kaggle'
 EXCLUDE = re.compile(r'top-?shot', re.I)  # NFT trading data, not basketball
-TABULAR = {'.csv', '.tsv', '.txt', '.parquet', '.json', '.jsonl', '.ndjson', '.sqlite', '.db', '.sqlite3', '.xlsx'}
+TABULAR = {'.csv', '.tsv', '.txt', '.parquet', '.parq', '.json', '.jsonl', '.ndjson', '.sqlite', '.db', '.sqlite3', '.xlsx'}
 
 
 def slug(s: str) -> str:
@@ -86,8 +86,28 @@ def load_file(c, f: Path, ext: str, prefix: str, rel: str, used: set[str]) -> tu
             c.execute('DETACH kag_sqlite')
     name = table_name(prefix, rel, used)
     if ext in {'.csv', '.tsv', '.txt'}:
-        src = f"read_csv({p}, all_varchar=true, header=true, sample_size=-1, ignore_errors=false, null_padding=true, strict_mode=false)"
-    elif ext == '.parquet':
+        # strictest reading first; fall back only on parse errors, never by skipping rows
+        variants = ["", ", parallel=false", ", parallel=false, encoding='latin-1'", ", parallel=false, delim=';'",
+                    ", parallel=false, delim=';', encoding='latin-1'"]
+        err = None
+        for v in variants:
+            src = f"read_csv({p}, all_varchar=true, header=true, sample_size=-1, ignore_errors=false, null_padding=true, strict_mode=false{v})"
+            try:
+                c.execute(f'CREATE OR REPLACE TABLE raw_kaggle.{q(name)} AS SELECT * FROM {src}')
+                err = None
+                break
+            except Exception as e:
+                err = e
+        if err is not None:
+            used.discard(name)
+            raise err
+        n = c.execute(f'SELECT count(*) FROM raw_kaggle.{q(name)}').fetchone()[0]
+        if n == 0:
+            c.execute(f'DROP TABLE raw_kaggle.{q(name)}')
+            used.discard(name)
+            return [], 0
+        return [name], n
+    elif ext in ('.parquet', '.parq'):
         src = f'read_parquet({p})'
     elif ext in {'.json', '.jsonl', '.ndjson'}:
         src = f'read_json({p}, maximum_object_size=1073741824)'

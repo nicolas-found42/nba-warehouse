@@ -1,5 +1,5 @@
 # Databases, downloads and evidence stay local (size and source terms)
-data/
+data
 *.duckdb
 *.duckdb.wal
 # Third-party reference project (MIT, upstream: github.com/wyattowalsh/nbadb)
