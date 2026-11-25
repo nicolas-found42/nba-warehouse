@@ -4,11 +4,11 @@ Runs unattended (launchd, 06:00 ET with retries). Each run:
   1. captures the publisher-digest-pinned SportsDataverse season assets into local evidence,
   2. rebuilds the current-season snapshot with refresh_current_season.py (all of its checks,
      including that no previously admitted final changed and an exact offline replay),
-  3. snapshots today's NBA referee assignments into raw.referee_assignment_snapshot,
+  3. publishes NBA injury reports and roster captures independently of the completed-game cutoff,
   4. swaps the season's rows in core/audit on a copy-on-write clone of the warehouse file,
      re-runs the integrity checks, and atomically replaces the warehouse only if all pass.
 
-A failed check rolls everything back: the warehouse is unchanged and a report is written to
+A failed check leaves the completed-game release unchanged and writes a report to
 data/refresh-reports/. When the publisher has not yet released data that closes yesterday's
 games, the run exits 75 ("not ready") and the next scheduled attempt tries again.
 
@@ -31,8 +31,10 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import duckdb
+import pregame_sources
 
 from build_warehouse import DEFAULT_OUT, ROOT, connect, lit, q, warehouse_lock
+from injury_reports import capture_daily, publish as publish_injury_reports
 
 ET = ZoneInfo('America/New_York')
 EVIDENCE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence'
@@ -220,10 +222,27 @@ def main() -> int:
     c = connect(a.warehouse, read_only=True)
     done = c.execute(f'SELECT cutoff FROM audit."{PREFIX}scope"').fetchone()[0]
     c.close()
-    if done >= cutoff and not a.force:
-        print(f'already current through {done}')
-        return 0
+    injury_reports = {}
+    pregame = None
+    capture_errors = []
     try:
+        injury_reports = capture_daily(now)
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        capture_errors.append(f'injury report capture failed: {e}')
+    try:
+        pregame = pregame_sources.capture(now)
+    except (OSError, ValueError) as e:
+        capture_errors.append(f'pregame schedule or roster capture failed: {e}')
+    for error in capture_errors:
+        print(error, file=sys.stderr)
+    try:
+        if injury_reports or pregame:
+            with warehouse_lock(), connect(a.warehouse) as c:
+                publish_injury_reports(c, injury_reports, pregame=pregame)
+        print(f'pregame refresh: {len(injury_reports)} injury report PDFs available', flush=True)
+        if done >= cutoff and not a.force:
+            print(f'game data already current through {done}')
+            return int(bool(capture_errors))
         # hold the writers' lock for the whole run: export, rebuild, clone, swap (gap chasing waits)
         with warehouse_lock(), tempfile.TemporaryDirectory(dir=ROOT / 'data', prefix='.refresh-') as w:
             work = Path(w)
@@ -232,15 +251,18 @@ def main() -> int:
             snap = work / 'snapshot.duckdb'
             build_snapshot(assets, cutoff, hist, prior, prev, snap)
             result = merge(a.warehouse, snap, cutoff, dt.datetime.now(dt.timezone.utc), work)
+        result['injury_reports'] = len(injury_reports)
+        if capture_errors:
+            result['capture_errors'] = capture_errors
         report.write_text(f'committed cutoff {cutoff}\n{json.dumps(result, indent=2)}\n')
         print(report.read_text())
-        return 0
+        return int(bool(capture_errors))
     except NotReady as e:
         report.write_text(f'not ready: {e}\n')
         print(f'not ready: {e}')
         return NOT_READY
     except Exception:
-        report.write_text(f'FAILED, warehouse unchanged (cutoff {cutoff})\n\n{traceback.format_exc()}')
+        report.write_text(f'FAILED, completed-game release unchanged (cutoff {cutoff})\n\n{traceback.format_exc()}')
         print(report.read_text(), file=sys.stderr)
         return 1
 

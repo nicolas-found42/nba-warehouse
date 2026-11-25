@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 from bref_fetch import BlockedError, NotFound, fetch
-from build_warehouse import DEFAULT_OUT, connect, warehouse_lock
+from build_warehouse import DEFAULT_OUT, connect, warehouse_lock, warehouse_transaction
 from fetch_bref_periods import Fixture, parse_box
 
 SOURCE = 'basketball_reference_box'
@@ -107,15 +107,29 @@ def finalize(warehouse: Path) -> None:
         import load_nba_gaps, promote_domains as pd
         load_nba_gaps.starters(c)
         load_nba_gaps.llimllib_starters(c)
-        load_nba_gaps.pbp(c)
-        load_nba_gaps.boxes(c)
+        with warehouse_transaction(c):
+            load_nba_gaps.pbp(c)
+            load_nba_gaps.boxes(c)
+        load_nba_gaps.repair_foreign_names(c)
         load_nba_gaps.officials(c)
         load_nba_gaps.periods(c)
-        load_nba_gaps.pbp_starters(c)
         load_nba_gaps.team_from_players(c)
         import load_wayback_nba  # archived NBA.com pages (ranked above ESPN)
         if (load_wayback_nba.CACHE / 'pages').exists():
             load_wayback_nba.load(c, load_wayback_nba.build_index(c))
+        from fetch_newspaper_periods import publish_verified_boundaries
+        publish_verified_boundaries(c)
+        import load_cska_box
+        load_cska_box.create_starter_table(c)
+        if load_cska_box.CACHE.is_file():
+            load_cska_box.load(c)
+        from load_preseason_press import load as load_press
+        load_press(c)
+        from load_nbastats_history import publish_own_basket
+        publish_own_basket(c)
+        from load_usatoday_preseason import load as load_usatoday
+        load_usatoday(c)
+        load_nba_gaps.pbp_starters(c)
         # promotion reads these even before the first archive load
         c.execute('CREATE TABLE IF NOT EXISTS raw.wayback_game_official (game_id VARCHAR, official_name VARCHAR, official_order INTEGER, jersey_num VARCHAR, official_id BIGINT)')
         c.execute('CREATE TABLE IF NOT EXISTS raw.wayback_starter (game_id VARCHAR, team_id BIGINT, person_id BIGINT)')

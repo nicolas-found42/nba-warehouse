@@ -191,6 +191,9 @@ def pbp_starters(c) -> None:
     outgoing player's id; the incoming surname is resolved within the team's box score). A player is a starter when his
     first first-quarter appearance comes before he is ever substituted in. Admitted only when that gives exactly 5 players per team."""
     c.execute('CREATE TABLE IF NOT EXISTS raw.pbp_inferred_starter (game_id VARCHAR, team_id BIGINT, person_id BIGINT)')
+    prior: dict[str, list[tuple]] = {}
+    for row in c.execute('SELECT game_id, team_id, person_id FROM raw.pbp_inferred_starter').fetchall():
+        prior.setdefault(row[0], []).append(row)
     gaps = [r[0] for r in c.execute("""SELECT game_id FROM audit.game_coverage WHERE domain = 'starting_lineup'
         AND status IN ('missing_recoverable', 'source_unavailable') AND game_id IN (SELECT game_id FROM core.fact_play_event)
         UNION SELECT game_id FROM raw.pbp_inferred_starter""").fetchall()]  # earlier inferences are re-derived, not dropped
@@ -201,31 +204,45 @@ def pbp_starters(c) -> None:
                 JOIN core.dim_person d USING (person_id) WHERE s.game_id = ?""", [g]).fetchall():
             roster.setdefault(t, {}).setdefault(re.sub(r'[^a-z]', '', (name or '').split()[-1].lower()), []).append(p)
         first: dict[tuple, str] = {}
+        unresolved_sub = False
         # first quarter only: lineup changes between periods are not logged as substitutions
         for an, kind_, desc, t, p in c.execute("""SELECT action_number, action_kind, description, team_id, person_id
                 FROM core.fact_play_event WHERE game_id = ? AND period = 1 ORDER BY seconds_remaining DESC, action_number""", [g]).fetchall():
-            m = re.match(r'SUB:\s*(.+?)\s+FOR\s+', desc or '') if kind_ == 'substitution' else None
-            if m and t in roster:
-                ids = roster[t].get(re.sub(r'[^a-z]', '', m.group(1).split()[-1].lower()), [])
-                if len(ids) == 1:
-                    first.setdefault((t, ids[0]), 'in')
+            if kind_ == 'substitution':
+                m = re.match(r'SUB:\s*(.+?)\s+FOR\s+', desc or '', re.I) or re.search(
+                    r'\bSubstitution replaced by\s+(.+?)\s*$', desc or '', re.I)
+                label = re.sub(r'[^a-z]', '', m.group(1).split()[-1].lower()) if m else ''
+                ids = roster.get(t, {}).get(label, [])
+                if len(ids) != 1 or p is None:
+                    unresolved_sub = True
+                    break
+                first.setdefault((t, ids[0]), 'in')
             if p and t in roster:
                 first.setdefault((t, p), 'start')
         per = {}
         for (t, p), how in first.items():
             if how == 'start':
                 per.setdefault(t, []).append(p)
-        ok = len(per) == 2 and all(len(v) == 5 for v in per.values())
+        ok = not unresolved_sub and len(per) == 2 and all(len(v) == 5 for v in per.values())
+        if not ok and g in prior:
+            rows.extend(prior[g])
+            continue
         if ok:
             rows += [(g, t, p) for t, ps in per.items() for p in ps]
         attempts.append((g, 'admitted' if ok else 'no_data', 'inferred from play-by-play' if ok else
                          'play-by-play does not give 5 starters per team'))
-    c.execute('CREATE OR REPLACE TABLE raw.pbp_inferred_starter (game_id VARCHAR, team_id BIGINT, person_id BIGINT)')
-    if rows:
-        c.executemany('INSERT INTO raw.pbp_inferred_starter VALUES (?,?,?)', rows)
-    c.execute("DELETE FROM audit.gap_attempt WHERE domain = 'starting_lineup' AND source = 'pbp_inferred'")
-    if attempts:
-        c.executemany("INSERT INTO audit.gap_attempt VALUES ('starting_lineup', ?, 'pbp_inferred', now(), ?, ?)", attempts)
+    c.execute('BEGIN')
+    try:
+        c.execute('DELETE FROM raw.pbp_inferred_starter')
+        if rows:
+            c.executemany('INSERT INTO raw.pbp_inferred_starter VALUES (?,?,?)', rows)
+        for g, outcome, note in attempts:
+            c.execute("DELETE FROM audit.gap_attempt WHERE domain = 'starting_lineup' AND source = 'pbp_inferred' AND game_id = ?", [g])
+            c.execute("INSERT INTO audit.gap_attempt VALUES ('starting_lineup', ?, 'pbp_inferred', now(), ?, ?)", [g, outcome, note])
+        c.execute('COMMIT')
+    except BaseException:
+        c.execute('ROLLBACK')
+        raise
     print('starters inferred from play-by-play:', sum(a[1] == 'admitted' for a in attempts), 'of', len(attempts), 'games')
 
 
@@ -291,8 +308,8 @@ def boxes(c) -> None:
                     pid = num(p.get('personId'))
                     if pid and pid not in persons:
                         if espn_names is None or espn_names[0] != (g, side):
-                            from load_espn import names_by_stat_line  # NBA.com publishes no names for these players
-                            espn_names = ((g, side), names_by_stat_line(g, side == 'homeTeam', players))
+                            from load_espn import verified_names_by_stat_line  # NBA.com publishes no names for these players
+                            espn_names = ((g, side), verified_names_by_stat_line(c, g, side == 'homeTeam', players))
                         name = (f"{(p.get('firstName') or '').strip()} {(p.get('familyName') or '').strip()}".strip()
                                 or espn_names[1].get(pid) or f'Unnamed player (NBA.com id {pid}, {t.get("teamTricode") or "visiting club"})')
                         new_people.append((pid, name, g, tid))
@@ -348,6 +365,60 @@ def boxes(c) -> None:
     for dom, a in att.items():
         log(c, dom, list(a.values()))
     print('box rows from NBA.com: team', len(trows), '| player', len(prows), 'rows')
+
+
+def repair_foreign_names(c) -> None:
+    """Resolve previously unnamed NBA IDs using exact same-side matches across the cached fixtures."""
+    from load_espn import norm, verified_names_by_stat_line
+
+    people = dict(c.execute('SELECT person_id, display_name FROM core.dim_person').fetchall())
+    unresolved = {pid for pid, name in people.items() if (name or '').startswith('Unnamed player (')}
+    if not unresolved:
+        return
+    evidence = []
+    for file in sorted((CACHE / 'boxscoretraditionalv3').glob('*.json')):
+        box = json.loads(file.read_text()).get('boxScoreTraditional') or {}
+        for side in ('homeTeam', 'awayTeam'):
+            team = box.get(side) or {}
+            players = team.get('players') or []
+            pids = {num(p.get('personId')) for p in players}
+            if not pids & unresolved:
+                continue
+            evidence.append((file.stem, side, team.get('teamId'), players, pids))
+    resolutions: dict[int, dict[str, set[tuple[str, int, str]]]] = {}
+    known = {pid: name for pid, name in people.items() if name and pid not in unresolved}
+    while unresolved:
+        proposals: dict[int, dict[str, set[tuple[str, int, str]]]] = {}
+        for game, side, tid, players, pids in evidence:
+            if not pids & unresolved:
+                continue
+            for pid, name in verified_names_by_stat_line(c, game, side == 'homeTeam', players, known).items():
+                if pid in unresolved and norm(name):
+                    proposals.setdefault(pid, {}).setdefault(norm(name), set()).add((game, tid, name))
+        accepted = {pid: candidates for pid, candidates in proposals.items() if len(candidates) == 1}
+        if not accepted:
+            break
+        for pid, candidate in accepted.items():
+            known[pid] = min(next(iter(candidate.values())))[2]
+            unresolved.remove(pid)
+        resolutions.update(accepted)
+    if not resolutions:
+        return
+    c.execute('BEGIN')
+    try:
+        c.execute('''CREATE TABLE IF NOT EXISTS audit.nba_gap_person_name_receipt (
+            person_id BIGINT, game_id VARCHAR, team_id BIGINT, display_name VARCHAR, source VARCHAR, admitted_at TIMESTAMPTZ,
+            PRIMARY KEY (person_id, game_id, team_id, source))''')
+        for pid, candidate in resolutions.items():
+            c.execute('UPDATE core.dim_person SET display_name = ? WHERE person_id = ?', [known[pid], pid])
+            c.execute('UPDATE raw.nba_gap_person SET display_name = ? WHERE person_id = ?', [known[pid], pid])
+            c.executemany('INSERT OR IGNORE INTO audit.nba_gap_person_name_receipt VALUES (?,?,?,?,?,now())',
+                          [(pid, game, tid, name, 'espn_same_fixture') for game, tid, name in sorted(next(iter(candidate.values())))])
+        c.execute('COMMIT')
+    except BaseException:
+        c.execute('ROLLBACK')
+        raise
+    print('NBA.com blank player names resolved from ESPN:', len(resolutions), flush=True)
 
 
 def log(c, domain: str, attempts: list[tuple]) -> None:

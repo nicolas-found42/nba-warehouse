@@ -80,6 +80,18 @@ def warehouse_lock():
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+@contextmanager
+def warehouse_transaction(c):
+    """Commit facts and their audit records together, including executemany batches."""
+    c.execute('BEGIN')
+    try:
+        yield
+        c.execute('COMMIT')
+    except BaseException:
+        c.execute('ROLLBACK')
+        raise
+
+
 def attach_sources(c: duckdb.DuckDBPyConnection) -> None:
     c.execute(f'ATTACH {lit(str(RAW_SRC))} AS src_raw (READ_ONLY)')
     c.execute(f'ATTACH {lit(str(HIST_SRC))} AS src_hist (READ_ONLY)')

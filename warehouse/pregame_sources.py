@@ -1,0 +1,89 @@
+"""Public NBA schedule and roster captures mirrored by llimllib/nba_data."""
+from __future__ import annotations
+
+import datetime as dt
+import gzip
+import hashlib
+import json
+from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
+
+import duckdb
+
+from fetch_wayback_nba import cache_bytes
+
+SOURCE = 'https://basketball-data.billmill.org/nba/'
+CACHE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence' / 'pregame'
+ET = ZoneInfo('America/New_York')
+
+
+def fetch(url: str, dest: Path, signature: bytes) -> Path:
+    if not dest.exists():
+        with urlopen(Request(url, headers={'User-Agent': 'NBAWarehouse-Research/1.0'}), timeout=20) as response:
+            body = response.read(12_000_000)
+        if not body.startswith(signature):
+            raise ValueError(f'unexpected file format: {url}')
+        cache_bytes(dest, body)
+    return dest
+
+
+def capture(now: dt.datetime, history: bool = False):
+    season = now.year + (now.month >= 7)
+    schedule_url = f'{SOURCE}stats/schedule/season={season}/data.parquet'
+    schedule = fetch(schedule_url, CACHE / f'{now:%Y-%m-%d_%H}-schedule.parquet', b'PAR1')
+    if history:
+        roster_index = fetch(f'{SOURCE}stats/rosters_daily/season={season}/data.parquet',
+                             CACHE / f'{now:%Y-%m-%d_%H}-roster-index.parquet', b'PAR1')
+        with duckdb.connect() as c:
+            dates = [d for (d,) in c.execute('SELECT DISTINCT as_of_date FROM read_parquet(?) ORDER BY 1', [str(roster_index)]).fetchall()]
+    else:
+        dates = [now.date() - dt.timedelta(days=1), now.date()]
+    rosters = []
+    for date in dates:
+        url = f'{SOURCE}raw/stats/{season}/team_rosters/{date}.json.gz'
+        try:
+            artifact = fetch(url, CACHE / f'{date}-roster.json.gz', b'\x1f\x8b')
+        except HTTPError as e:
+            if e.code in (403, 404) and date == now.date():
+                continue  # the publisher may not have captured today's rosters yet
+            raise
+        raw = artifact.read_bytes()
+        envelope = json.loads(gzip.decompress(raw))
+        captured_at = dt.datetime.fromisoformat(envelope['fetched'])
+        if captured_at.tzinfo is None or captured_at.astimezone(ET).date() != date or captured_at > now:
+            raise ValueError(f'unexpected roster capture timestamp: {url}')
+        digest = hashlib.sha256(raw).hexdigest()
+        for team_id, roster in envelope['rosters'].items():
+            result = next(r for r in roster['resultSets'] if r['name'] == 'CommonTeamRoster')
+            for values in result['rowSet']:
+                row = dict(zip(result['headers'], values, strict=True))
+                if row['TeamID'] != int(team_id) or row['LeagueID'] != '00' or int(row['SEASON']) != season - 1:
+                    raise ValueError(f'wrong team or season in NBA roster: {url}')
+                rosters.append((int(team_id), row['PLAYER_ID'], row['PLAYER'], row['NUM'], row['POSITION'], date,
+                                captured_at, url, digest))
+    return schedule, schedule_url, rosters
+
+
+def publish(c, capture_data=None) -> None:
+    """Write to the caller's transaction and make fixture/roster views available on a fresh warehouse."""
+    c.execute('''CREATE TABLE IF NOT EXISTS raw.nba_pregame_schedule (
+        game_id VARCHAR, game_date DATE, start_time TIMESTAMPTZ, home_team_id BIGINT, away_team_id BIGINT,
+        status VARCHAR, source_url VARCHAR, captured_at TIMESTAMPTZ, sha256 VARCHAR)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS raw.nba_roster_capture (
+        team_id BIGINT, person_id BIGINT, player_name VARCHAR, jersey_number VARCHAR, position VARCHAR,
+        source_date DATE, observed_at TIMESTAMPTZ, source_url VARCHAR, sha256 VARCHAR,
+        PRIMARY KEY (team_id, person_id, observed_at, sha256))''')
+    if capture_data:
+        schedule, url, rosters = capture_data
+        stamp = dt.datetime.fromtimestamp(schedule.stat().st_mtime, dt.timezone.utc)
+        digest = hashlib.sha256(schedule.read_bytes()).hexdigest()
+        c.execute('''INSERT INTO raw.nba_pregame_schedule
+            SELECT game_id, game_date, start_time, try_cast(home_team_id AS BIGINT), try_cast(away_team_id AS BIGINT), status,
+                   ?, ?, ? FROM read_parquet(?)
+            WHERE NOT EXISTS (SELECT 1 FROM raw.nba_pregame_schedule WHERE captured_at = ? AND sha256 = ?)''',
+            [url, stamp, digest, str(schedule), stamp, digest])
+        if rosters:
+            c.executemany('INSERT OR IGNORE INTO raw.nba_roster_capture VALUES (?,?,?,?,?,?,?,?,?)', rosters)
+    c.execute(Path(__file__).with_suffix('.sql').read_text())

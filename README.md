@@ -44,7 +44,7 @@ One file, four layers:
 | `raw`, `raw_kaggle` | Every imported table exactly as received: the original snapshot, every Kaggle dataset, scraped pages, daily referee assignments | Never edited after load |
 | `core` | Verified, matched records you query | Every row's keys resolve to `core` dimensions; nothing unmatched |
 | `audit` | Why records are held, every competing value, source receipts, release history | Nothing is dropped silently |
-| `betting` | Odds rows linked to `core` games and teams | Nothing computed yet (see issues) |
+| `betting` | Odds, fixture links, pregame price pairs and closing-line comparisons | Quotes need a verified timestamp and tip-off for pregame use |
 
 **Definition of done:** every expected record is either verified or labelled — `not_tracked`,
 `source_unavailable`, `disputed` or `not_applicable` — in `audit`. A gap is given up after two
@@ -100,8 +100,34 @@ Install both scheduled jobs with `warehouse/launchd/install.sh`.
 
 `warehouse/daily_refresh.py` runs at 06:00 Eastern (launchd, retried at 09:00 and 12:00). It loads
 the previous day's games, runs every check on a copy-on-write clone of the warehouse, and replaces
-the warehouse only if all checks pass. Failures leave the warehouse unchanged and write a report
-to `data/refresh-reports/`. It also snapshots the day's referee assignments.
+the completed-game release only if all checks pass. Failures write a report to `data/refresh-reports/`.
+The job also snapshots the day's referee assignments. It publishes NBA injury reports, upcoming fixtures and
+captured rosters even when the completed-game release is delayed.
+
+### Pregame queries
+
+Use a timezone-bearing cutoff, such as `2026-11-25T16:00:00-05:00`, with `betting.odds_at(game_id, cutoff)`,
+`core.injury_report_at(game_id, cutoff)` and `core.roster_at(game_id, cutoff)`. `core.pregame_fixture` includes official
+schedule entries ahead of the results refresh. `core.injury_report_final_pregame` adds the separately observed participation
+status after the game. The as-of injury query links identities through rosters available at that cutoff. The final report
+can use the later game box. `audit.injury_report_resolution` records rows still missing a verified game, team or person match.
+
+`betting.price_pair` covers full-game moneyline, spread and totals. It exposes decimal prices, implied probabilities,
+overround and two-sided vig removal, with original values in the source tables. `betting.closing_price` uses the last
+unambiguous quote strictly before the scheduled tip-off for the same source, book, market and points line.
+`betting.closing_line_value` is an after-the-fact comparison against that quote. Publisher-labelled opens and closes with
+no quote time are visible through `betting.reported_open_close`. The original Pinnacle files lack a verified timezone,
+so their prices remain visible in `betting.price_pair` and are withheld from the cutoff queries.
+
+```sh
+uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py mirror
+uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py rosters
+uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py backfill --from-date 2018-12-17 --through 2019-06-14
+uv run --no-project --with duckdb==2.0.0 python warehouse/betting.py
+```
+
+Official PDF capture uses Poppler's `pdftotext`. Historical and daily source coverage is documented in the
+[research note](docs/research/gap-sources.md).
 
 ## History
 

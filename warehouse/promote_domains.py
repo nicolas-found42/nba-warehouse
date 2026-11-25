@@ -181,20 +181,35 @@ DOMAINS: list[Domain] = [
                 AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.fact_starting_lineup_player)
                 AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM core.fact_player_game_stats WHERE nullif(trim(starting_position), '') IS NOT NULL)
                 AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.nba_gap_starter)
-                AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.llimllib_starter))
+                AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.llimllib_starter)),
+              press_starters AS (
+                SELECT DISTINCT game_id,team_id,person_id FROM raw.usatoday_starter
+                QUALIFY count(DISTINCT person_id) OVER (PARTITION BY game_id,team_id) = 5)
               SELECT * FROM hi
               UNION ALL  -- archived NBA.com box pages (load_wayback_nba.py): only teams no source above names starters for
               SELECT game_id, team_id, person_id, NULL, 'nba_com_archive' FROM raw.wayback_starter
               WHERE (game_id, team_id) NOT IN (SELECT game_id, team_id FROM hi)
+              UNION ALL
+              SELECT game_id, team_id, person_id, NULL, source FROM raw.captured_club_starter
+              WHERE (game_id, team_id) NOT IN (SELECT game_id, team_id FROM hi)
+                AND (game_id, team_id) NOT IN (SELECT game_id, team_id FROM raw.wayback_starter)
+              UNION ALL
+              SELECT game_id, team_id, person_id, NULL, 'usatoday_preseason' FROM press_starters
+              WHERE (game_id, team_id) NOT IN (SELECT game_id,team_id FROM hi UNION ALL
+                  SELECT game_id,team_id FROM raw.wayback_starter UNION ALL SELECT game_id,team_id FROM raw.captured_club_starter)
               UNION ALL  -- ESPN public API starters (load_espn.py, owner-approved), lowest rank: only teams no source above names starters for
               SELECT game_id, team_id, person_id, NULL, 'espn_api' FROM raw.espn_api_starter
               WHERE (game_id, team_id) NOT IN (SELECT game_id, team_id FROM hi)
                 AND (game_id, team_id) NOT IN (SELECT game_id, team_id FROM raw.wayback_starter)
+                AND (game_id, team_id) NOT IN (SELECT game_id, team_id FROM raw.captured_club_starter)
+                AND (game_id, team_id) NOT IN (SELECT game_id, team_id FROM press_starters)
               UNION ALL  -- starters inferred from NBA play-by-play (load_nba_gaps.pbp_starters), only teams no source names starters for
               SELECT game_id, team_id, person_id, NULL, 'pbp_inferred' FROM raw.pbp_inferred_starter
               WHERE (game_id, team_id) NOT IN (SELECT game_id, team_id FROM hi)
                 AND (game_id, team_id) NOT IN (SELECT game_id, team_id FROM raw.espn_api_starter)
-                AND (game_id, team_id) NOT IN (SELECT game_id, team_id FROM raw.wayback_starter)''',
+                AND (game_id, team_id) NOT IN (SELECT game_id, team_id FROM raw.wayback_starter)
+                AND (game_id, team_id) NOT IN (SELECT game_id, team_id FROM raw.captured_club_starter)
+                AND (game_id, team_id) NOT IN (SELECT game_id, team_id FROM press_starters)''',
            key=['game_id', 'person_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'person_id': 'core.dim_person(person_id)',
                 '(game_id, team_id)': 'core.bridge_game_team(game_id, team_id)'},
@@ -285,33 +300,49 @@ bb AS (  -- Basketball-Reference box-page crews (referee ids resolved by load_br
               WHERE g.season_type IN ('Regular', 'Playoffs')),
 bb_full AS (SELECT game_id FROM bb GROUP BY 1 HAVING count(DISTINCT official_id) >= 3),
 espn_only AS (  -- games whose crew comes only from ESPN, which Basketball-Reference outranks
-              SELECT game_id FROM base GROUP BY 1 HAVING bool_and(source IN ('espn', 'espn_sdv')))
+              SELECT game_id FROM base GROUP BY 1 HAVING bool_and(source IN ('espn', 'espn_sdv'))),
+arc AS (
+              SELECT DISTINCT game_id, official_id, nullif(jersey_num, '') AS jersey_num, 'nba_com_archive' AS source
+              FROM raw.wayback_game_official WHERE official_id IS NOT NULL
+              UNION ALL
+              SELECT DISTINCT game_id, official_id, NULL, 'newspaper_hurriyet' FROM raw.press_game_official
+              WHERE game_id NOT IN (SELECT game_id FROM raw.wayback_game_official WHERE official_id IS NOT NULL)
+              UNION ALL
+              SELECT DISTINCT game_id, official_id, NULL, 'usatoday_preseason' FROM raw.usatoday_official
+              WHERE game_id NOT IN (SELECT game_id FROM raw.wayback_game_official WHERE official_id IS NOT NULL UNION ALL
+                                   SELECT game_id FROM raw.press_game_official)
+              QUALIFY count(DISTINCT official_id) OVER (PARTITION BY game_id) = 3),
+arc_eligible AS (
+              SELECT game_id FROM arc GROUP BY game_id
+              HAVING count(DISTINCT official_id) >= 3 OR game_id NOT IN (SELECT game_id FROM base UNION SELECT game_id FROM bb)),
+arc_selected AS (
+              SELECT * FROM arc WHERE game_id IN (SELECT game_id FROM arc_eligible)
+                AND game_id NOT IN (SELECT game_id FROM base WHERE source IN ('nba_box_summary', 'nba_summary_v3'))),
+ranked AS (
               SELECT * FROM base WHERE game_id NOT IN (SELECT game_id FROM espn_only WHERE game_id IN (SELECT game_id FROM bb_full))
               UNION ALL  -- a full Basketball-Reference crew replaces an ESPN-only crew
               SELECT * FROM bb WHERE game_id IN (SELECT game_id FROM espn_only) AND game_id IN (SELECT game_id FROM bb_full)
-              UNION ALL  -- archived NBA.com box pages (load_wayback_nba.py), only games no source above names anyone for
-              SELECT DISTINCT w.game_id, w.official_id, w.jersey_num, 'nba_com_archive'
-              FROM raw.wayback_game_official w  -- official_id resolved by name, else jersey + surname (load_wayback_nba.py)
-              WHERE w.official_id IS NOT NULL AND w.game_id NOT IN (SELECT game_id FROM base) AND w.game_id NOT IN (SELECT game_id FROM bb)
               UNION ALL  -- ESPN public API crews (load_espn.py, owner-approved), lowest rank: only games no source above names anyone for
               SELECT DISTINCT e.game_id, o.official_id, o.jersey_num, 'espn_api'
               FROM raw.espn_api_game_official e
               JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('e.official_name') + '''
               WHERE e.game_id NOT IN (SELECT game_id FROM base) AND e.game_id NOT IN (SELECT game_id FROM bb)
-                AND e.game_id NOT IN (SELECT game_id FROM raw.wayback_game_official)
+                AND e.game_id NOT IN (SELECT game_id FROM arc_selected)
               UNION ALL  -- Wikipedia All-Star Game infobox crews (load_wiki_officials.py), lowest rank, only games no source above names anyone for
               SELECT DISTINCT w.game_id, o.official_id, o.jersey_num, 'wikipedia'
               FROM raw.wiki_game_official w
               JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('w.official_name') + '''
               WHERE w.game_id NOT IN (SELECT game_id FROM base) AND w.game_id NOT IN (SELECT game_id FROM bb)
                 AND w.game_id NOT IN (SELECT game_id FROM raw.espn_api_game_official)
-                AND w.game_id NOT IN (SELECT game_id FROM raw.wayback_game_official)
+                AND w.game_id NOT IN (SELECT game_id FROM arc_selected)
               UNION ALL  -- otherwise Basketball-Reference completes crews of fewer than 3, or gives a full crew where no source has one
               SELECT * FROM bb
               WHERE bb.game_id NOT IN (SELECT game_id FROM espn_only)
                 AND (bb.game_id IN (SELECT game_id FROM base GROUP BY 1 HAVING count(DISTINCT official_id) < 3)
                      OR (bb.game_id NOT IN (SELECT game_id FROM base) AND bb.game_id IN (SELECT game_id FROM bb_full)))
-                AND (bb.game_id, bb.official_id) NOT IN (SELECT game_id, official_id FROM base)''',
+                AND (bb.game_id, bb.official_id) NOT IN (SELECT game_id, official_id FROM base))
+              SELECT * FROM ranked WHERE game_id NOT IN (SELECT game_id FROM arc_selected)
+              UNION ALL SELECT * FROM arc_selected''',
            key=['game_id', 'official_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'official_id': 'core.dim_official(official_id)'},
            not_null=['game_id', 'official_id']),
@@ -390,6 +421,14 @@ def main() -> None:
     ap.add_argument('--only', nargs='*')
     a = ap.parse_args()
     c = connect(a.output)
+    c.execute('''CREATE TABLE IF NOT EXISTS raw.captured_club_starter (
+        game_id VARCHAR, team_id BIGINT, person_id BIGINT, source VARCHAR, source_url VARCHAR,
+        PRIMARY KEY (game_id, team_id, person_id, source))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS raw.press_game_official (
+        game_id VARCHAR, official_id BIGINT, official_name VARCHAR, official_order INTEGER, source_url VARCHAR, sha256 VARCHAR,
+        PRIMARY KEY (game_id, official_id, sha256))''')
+    from load_usatoday_preseason import create_tables as create_usatoday_tables
+    create_usatoday_tables(c)
     c.execute('''CREATE TABLE IF NOT EXISTS audit.domain_disposition (domain VARCHAR PRIMARY KEY, source VARCHAR,
         source_rows BIGINT, published BIGINT, duplicate BIGINT, held BIGINT)''')
     c.execute('CREATE TABLE IF NOT EXISTS audit.domain_held (domain VARCHAR, source_row BIGINT, reason VARCHAR, row_json JSON)')

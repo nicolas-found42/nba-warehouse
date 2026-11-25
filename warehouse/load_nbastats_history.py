@@ -15,12 +15,17 @@ under evidence/nbastats/ with their SHA-256. Attempts go to audit.gap_attempt (s
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
+import re
 from pathlib import Path
 
-from build_warehouse import DEFAULT_OUT, connect, warehouse_lock
+from build_warehouse import DEFAULT_OUT, connect, warehouse_lock, warehouse_transaction
 
 EVIDENCE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence' / 'nbastats'
 SOURCE = 'nbastats_net'
+OWN_BASKET_GAME = '0024900497'
+TEAM_BOX_URL = 'http://nbastats.net/01NbaAbaNblAbl/06-Teams/02-GameStatistics-Team.xlsx'
 
 
 def n(v: str) -> int | None:
@@ -53,6 +58,43 @@ def team_games() -> list[tuple]:
                         n(r[15]), n(r[16]), n(r[18]), n(r[19]), n(r[21]), n(r[22]), n(r[24]), n(r[25]), n(r[26]), n(r[27]),
                         n(r[28]), n(r[29]), n(r[30]), n(r[31]), n(r[32])))
     return out
+
+
+def publish_own_basket(c) -> None:
+    """The March 3, 1950 team table records two opponent own-basket points separately."""
+    evidence = EVIDENCE / 'GameStatistics-Team.csv'
+    if not evidence.is_file() or c.execute('SELECT 1 FROM core.fact_team_game_stats WHERE game_id = ? AND team_id = 1610612744',
+                                          [OWN_BASKET_GAME]).fetchone():
+        return
+    fixture = c.execute('''SELECT g.home_team_id,g.away_team_id,r.home_score,r.away_score
+        FROM core.dim_game g JOIN core.fact_game_result r USING (game_id)
+        WHERE game_id = ? AND g.game_date = DATE '1950-03-03' ''', [OWN_BASKET_GAME]).fetchone()
+    if fixture != (1610612744, 1610612747, 66, 61):
+        raise ValueError('Philadelphia own-basket receipt does not match the warehouse fixture')
+    raw = evidence.read_bytes()
+    rows = [r for r in csv.reader(io.StringIO(raw.decode('utf-8', errors='replace'))) if len(r) > 33
+            and r[:5] == ['NBA', 'Reg', '3', '3', '1950'] and r[6:10] == ['PHI', 'MIN', '66', '61']]
+    if len(rows) != 1:
+        raise ValueError('Philadelphia team box must identify one fixture')
+    r = rows[0]
+    note = next((cell for cell in r[33:] if re.search(r'\b\d+ points? scored by George Mikan\b', cell, re.I)), '')
+    extra = re.search(r'\b(\d+) points? scored by George Mikan\b', note, re.I)
+    fgm, fga, ftm, fta, ast, pf, pts = [n(r[i]) for i in (15, 16, 21, 22, 27, 31, 32)]
+    if None in (fgm, fga, ftm, fta, pts) or not extra or 'Philadelphia basket' not in note or not (
+            fgm <= fga and ftm <= fta and 2 * fgm + ftm == pts and pts + int(extra[1]) == fixture[2]):
+        raise ValueError('own-basket score and the printed shooting totals disagree')
+    with warehouse_transaction(c):
+        c.execute('''CREATE TABLE IF NOT EXISTS audit.team_box_scoring_adjustment (
+            game_id VARCHAR, team_id BIGINT, credited_points INTEGER, printed_player_points INTEGER,
+            source_url VARCHAR, sha256 VARCHAR, note VARCHAR, PRIMARY KEY (game_id, team_id))''')
+        c.execute('''INSERT INTO audit.team_box_scoring_adjustment VALUES (?,?,?,?,?,?,?)''',
+                  [OWN_BASKET_GAME, fixture[0], int(extra[1]), pts, TEAM_BOX_URL, hashlib.sha256(raw).hexdigest(), note])
+        c.execute('''INSERT INTO core.fact_team_game_stats (game_id,team_id,is_home,is_win,pts,fgm,fga,ftm,fta,ast,pf)
+            VALUES (?,?,true,true,?,?,?,?,?,?,?)''', [OWN_BASKET_GAME, fixture[0], fixture[2], fgm, fga, ftm, fta, ast, pf])
+        c.execute('''INSERT INTO audit.gap_attempt VALUES
+            ('team_box', ?, ?, now(), 'admitted', 'Published 64 player points plus two documented opponent own-basket points')''',
+            [OWN_BASKET_GAME, SOURCE])
+    print(f'Philadelphia team box admitted with documented own-basket points: {OWN_BASKET_GAME}', flush=True)
 
 
 def main() -> None:

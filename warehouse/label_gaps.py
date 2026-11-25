@@ -48,26 +48,29 @@ CHECKS = [
 
 
 def label(c) -> None:
-    c.execute('DELETE FROM audit.gap_attempt WHERE note = ?', [NOTE])
     c.execute('''CREATE OR REPLACE TEMP TABLE open_gap AS SELECT gc.domain, gc.game_id FROM audit.game_coverage gc
         WHERE gc.status IN ('missing_recoverable', 'partial', 'source_unavailable')''')
+    c.execute('''DELETE FROM audit.gap_attempt WHERE (note = ? OR starts_with(note, ?))
+        AND (domain, game_id) IN (SELECT domain, game_id FROM open_gap)''', [NOTE, f'{NOTE}:'])
     for domains, source, has, span in CHECKS:
         q = ','.join(f"'{d}'" for d in domains)
         n = c.execute(f'''INSERT INTO audit.gap_attempt
             SELECT o.domain, o.game_id, ?, now(), 'not_found', ? FROM open_gap o JOIN core.dim_game g USING (game_id)
             WHERE o.domain IN ({q}) AND ({span}) AND o.game_id NOT IN ({has})''', [source, NOTE]).fetchone()[0]
         print(f'{source:18} {"/".join(domains):28} not found for {n} open gaps', flush=True)
-    # Basketball-Reference box pages fetched for officials gaps that list no officials
-    keys = c.execute('''SELECT o.game_id, strftime(g.game_date, '%Y%m%d') || '0' || t.source_key FROM open_gap o
+    # A cached page is evidence only for what the page actually reports.
+    keys = c.execute('''SELECT o.game_id, strftime(g.game_date, '%Y%m%d') || '0' || t.source_key,
+        (SELECT count(DISTINCT b.bref_referee_id) FROM raw.bref_box_official b
+         WHERE b.bref_game_key = strftime(g.game_date, '%Y%m%d') || '0' || t.source_key) AS officials FROM open_gap o
         JOIN core.dim_game g USING (game_id)
         JOIN core.team_source_id t ON t.team_id = g.home_team_id AND t.source_system = 'basketball_reference' AND t.league = 'NBA'
              AND t.season_end_year = CAST(substr(g.season_year, 1, 4) AS INTEGER) + 1
         WHERE o.domain = 'officials' ''').fetchall()
-    rows = [('officials', gid, 'bref_box', 'not_found', NOTE) for gid, k in keys
-            if (EVIDENCE / 'bref-cache' / 'boxscores' / f'{k}.html').exists()]
+    rows = [('officials', gid, 'bref_box', 'no_data', f'{NOTE}: cached page lists {n} official(s)') for gid, k, n in keys
+            if n < 3 and (EVIDENCE / 'bref-cache' / 'boxscores' / f'{k}.html').exists()]
     if rows:
         c.executemany('INSERT INTO audit.gap_attempt VALUES (?,?,?,now(),?,?)', rows)
-    print(f'{"bref_box":18} {"officials":28} page has no officials for {len(rows)} open gaps')
+    print(f'{"bref_box":18} {"officials":28} page lacks a complete crew for {len(rows)} open gaps')
 
 
 def main() -> None:

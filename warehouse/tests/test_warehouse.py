@@ -7,6 +7,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import duckdb
@@ -122,6 +123,30 @@ def test_refresh_rejects_a_disappearing_final(warehouse: Path, tmp_path: Path) -
     assert digest(warehouse) == before
 
 
+def test_daily_pregame_capture_is_published_when_game_assets_are_late(warehouse, tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, 'argv', ['daily_refresh.py', '--warehouse', str(warehouse), '--cutoff', '2026-11-21'])
+    monkeypatch.setattr(daily_refresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(daily_refresh, 'REPORTS', tmp_path / 'data' / 'reports')
+    monkeypatch.setattr(daily_refresh, 'warehouse_lock', nullcontext)
+    monkeypatch.setattr(daily_refresh, 'capture_daily', lambda now: {'report': object()})
+    monkeypatch.setattr(daily_refresh.pregame_sources, 'capture', lambda now: None)
+
+    def publish(c, reports, pregame=None):
+        assert list(reports) == ['report']
+        c.execute('CREATE TABLE raw.pregame_capture AS SELECT 1 AS captured')
+
+    def late(cutoff):
+        raise daily_refresh.NotReady('publisher assets do not yet cover the cutoff')
+
+    monkeypatch.setattr(daily_refresh, 'publish_injury_reports', publish)
+    monkeypatch.setattr(daily_refresh, 'capture', late)
+
+    assert daily_refresh.main() == daily_refresh.NOT_READY
+    with duckdb.connect(str(warehouse), read_only=True) as c:
+        assert c.execute('SELECT captured FROM raw.pregame_capture').fetchone() == (1,)
+        assert c.execute('SELECT count(*) FROM core.fact_game_result').fetchone() == (1,)
+
+
 # ----------------------------------------------------------------------------------------- gap chasing
 def box_html(path: str, day: dt.date, home: tuple[str, list[int]], away: tuple[str, list[int]]) -> bytes:
     def row(team: str, q: list[int]) -> str:
@@ -169,8 +194,8 @@ def test_coverage_gives_up_after_two_independent_sources(tmp_path: Path) -> None
     c.execute(CORE_DDL)
     c.execute("ALTER TABLE core.dim_game ADD COLUMN season_start SMALLINT; ALTER TABLE core.dim_game ADD COLUMN season_type VARCHAR;"
               "ALTER TABLE core.dim_game ADD COLUMN result_status VARCHAR; ALTER TABLE core.dim_game ADD COLUMN league_era VARCHAR")
-    for t in ('fact_starting_lineup', 'fact_game_official'):
-        c.execute(f'CREATE TABLE core.{t} (game_id VARCHAR)')
+    c.execute('CREATE TABLE core.fact_starting_lineup (game_id VARCHAR, team_id BIGINT)')
+    c.execute('CREATE TABLE core.fact_game_official (game_id VARCHAR)')
     for gid in ('A', 'B', 'C'):
         c.execute(f"INSERT INTO core.dim_game VALUES ('{gid}', '1950-51', DATE '1951-01-01', 1950, 'Regular', 'final', 'NBA')")
     c.execute("CREATE TABLE audit.period_availability_v26 (game_id VARCHAR, status VARCHAR)")

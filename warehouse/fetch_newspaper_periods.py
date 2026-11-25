@@ -1,7 +1,7 @@
 """Quarter scores for old games from digitized newspapers (Library of Congress, Chronicling America; free, no key).
 
 For each game still missing period scores (before 1970), search the loc.gov Chronicling America collection for pages
-dated the game day and the next day that mention both team nicknames, read each page's OCR text, and look for the
+dated the game day through two days later. Search one nickname plus "periods" at a time, read page OCR, and look for the
 "score by periods" (or "by quarters") lines printed under the box score. A line is admitted only when:
   - both teams' lines are found in the same box-score passage,
   - they have the same number of periods (at least 4),
@@ -9,14 +9,15 @@ dated the game day and the next day that mention both team nicknames, read each 
   - the teams are tied after regulation whenever overtime periods are printed.
 OCR is noisy, so anything that does not reconcile exactly is ignored rather than corrected.
 
-Cache: evidence/loc/{search,ocr}/ (raw responses, never refetched). Receipts: audit.period_receipt_newspaper
-(game_id, page url, OCR url, sha256 of the OCR text, the matched passage). Source rank: archived newspapers.
+Cache: evidence/loc/{search,ocr}/ (raw responses, never refetched). Keep matching text in the candidate
+ledger until the printed numbers can be checked against the scan. Source rank: archived newspapers.
 
   uv run --no-project --with duckdb==2.0.0 python warehouse/fetch_newspaper_periods.py [--limit N]
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import hashlib
 import json
@@ -24,11 +25,14 @@ import re
 import time
 from pathlib import Path
 from urllib.parse import quote
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from build_warehouse import DEFAULT_OUT, connect, warehouse_lock
+from build_warehouse import DEFAULT_OUT, connect, warehouse_lock, warehouse_transaction
+from fetch_wayback_nba import cache_bytes
 
 CACHE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence' / 'loc'
+SCANS = CACHE.parent / 'newspapers' / 'verified'
 API = 'https://www.loc.gov/collections/chronicling-america/'
 SOURCE = 'newspaper_loc'
 PAUSE = 1.5
@@ -38,18 +42,25 @@ MARKERS = re.compile(r'(score\s*(at|by)\s*(the\s*)?(periods?|quarters?)|by\s+per
 def get(url: str, path: Path) -> bytes:
     if path.exists():
         return path.read_bytes()
-    for attempt in range(4):
+    for attempt in range(2):
         try:
-            with urlopen(Request(url, headers={'User-Agent': 'NBAWarehouse-Research/1.0'}), timeout=90) as r:
+            with urlopen(Request(url, headers={'User-Agent': 'NBAWarehouse-Research/1.0'}), timeout=15) as r:
                 body = r.read()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(body)
+            cache_bytes(path, body)
             time.sleep(PAUSE)
             return body
-        except Exception as e:
+        except HTTPError as e:
+            if e.code in (403, 429):
+                print(f'Chronicling America returned HTTP {e.code}: {url}', flush=True)
+                raise
+            if e.code == 404:
+                time.sleep(PAUSE)
+                return b''
+            print('retry', e.code, url, flush=True)
+        except (URLError, TimeoutError) as e:
             print('retry', type(e).__name__, url[:120], flush=True)
-            time.sleep(20 * (attempt + 1))
-    return b''
+        time.sleep(PAUSE * (attempt + 1))
+    raise OSError(f'Chronicling America request failed: {url}')
 
 
 def ocr_text(raw: bytes) -> str:
@@ -63,13 +74,15 @@ def ocr_text(raw: bytes) -> str:
 
 
 def numbers_after(text: str, key: str) -> list[list[int]]:
-    """Every run of 4 to 8 small numbers printed after `key` on the same line (OCR separators tolerated)."""
+    """Find contiguous printed numbers after a team name; never skip a damaged cell."""
     out = []
-    for m in re.finditer(re.escape(key), text, re.I):
-        line = text[m.end():m.end() + 70].split('\n')[0]
-        nums = [int(x) for x in re.findall(r'\b\d{1,3}\b', line)]
-        if 4 <= len(nums) <= 9:
-            out.append(nums)
+    for m in re.finditer(r'(?<!\w)' + re.escape(key) + r'(?!\w)', text, re.I):
+        tail = text[m.end():m.end() + 95]
+        line = re.match(r'[ .:|_…\t-]*(?:\n[ \t]*)?(\d{1,3}(?:[ \t.·|:–—-]+\d{1,3}){3,9})(?!\d)', tail)
+        if line:
+            nums = [int(x) for x in re.findall(r'\d+', line[1])]
+            if max(nums[:-1]) <= 99:
+                out.append(nums)
     return out
 
 
@@ -86,15 +99,18 @@ def candidates(text: str, keys: list[str], final: int) -> list[list[int]]:
 
 def parse(text: str, home: tuple, away: tuple) -> tuple[list[int], list[int], str] | None:
     """home/away = (keys, final). Look only inside passages that start at a 'by periods' marker."""
-    for m in MARKERS.finditer(text):
-        passage = text[m.start():m.start() + 260]
+    matches = {}
+    markers = list(MARKERS.finditer(text))
+    for i, m in enumerate(markers):
+        end = min(m.start() + 360, markers[i + 1].start()) if i + 1 < len(markers) else m.start() + 360
+        passage = text[m.start():end]
         hc, ac = candidates(passage, *home), candidates(passage, *away)
         for h in hc:
             for a in ac:
                 n = len(h)
                 if n == len(a) and n >= 4 and all(sum(h[:i]) == sum(a[:i]) for i in range(4, n)):
-                    return h, a, passage
-    return None
+                    matches[(tuple(h), tuple(a))] = h, a, passage
+    return next(iter(matches.values())) if len(matches) == 1 else None
 
 
 def games(c, limit: int | None, since: str = '1946-01-01') -> list[tuple]:
@@ -118,76 +134,136 @@ def keys(name: str) -> list[str]:
     parts = name.split()
     nick = parts[-1]
     city = ' '.join(parts[:-1])
-    return [k for k in {nick, city, city.split()[-1] if city else nick} if len(k) >= 4]
+    aliases = {'Capitols': ('Caps', 'Wash.', 'Wash'), 'Knicks': ('Knickerbockers', 'N.Y.'),
+               'Celtics': ('Bos.',), 'Warriors': ('Phila.', 'Phila'), 'Steamrollers': ('Providence', 'Prov.')}
+    return sorted({k for k in (name, nick, city, *aliases.get(nick, ())) if k}, key=lambda k: (-len(k), k))
+
+
+def search_game(gid, day, ht, at, hn, an, hs, aws):
+    d1, d2 = day.isoformat(), (day + dt.timedelta(days=2)).isoformat()
+    seen, hits = set(), {}
+    queries = [(f'{hn.split()[-1]} periods', 'home'), (f'{an.split()[-1]} periods', 'away')]
+    for q, side in queries:
+        url = f'{API}?q={quote(q)}&dates={d1}/{d2}&fo=json&c=20'
+        raw_search = get(url, CACHE / 'search' / f'{gid}-{side}-periods.json')
+        results = json.loads(raw_search).get('results') or []
+        for item in results:
+            page = item.get('id') or ''
+            m = re.search(r'/resource/(sn\w+)/(\d{4}-\d{2}-\d{2})/ed-(\d+)/\?sp=(\d+)', page)
+            if not m or page in seen:
+                continue
+            seen.add(page)
+            key = '_'.join(m.groups())
+            meta = get(f'https://www.loc.gov/resource/{m[1]}/{m[2]}/ed-{m[3]}/?sp={m[4]}&fo=json', CACHE / 'page' / f'{key}.json')
+            ocr_url = (json.loads(meta or b'{}').get('resource') or {}).get('fulltext_file')
+            if not ocr_url:
+                continue
+            raw = get(ocr_url, CACHE / 'ocr' / f'{key}.txt')
+            p = parse(ocr_text(raw), (keys(hn), hs), (keys(an), aws))
+            if p:
+                hits[(tuple(p[0]), tuple(p[1]))] = (gid, ht, at, p[0], p[1], page, ocr_url, hashlib.sha256(raw).hexdigest(), p[2])
+    return next(iter(hits.values())) if len(hits) == 1 else None, len(seen), len(hits) > 1
+
+
+def cumulative_periods(boundaries: list[tuple[int, int, int]], home_final: int, away_final: int) -> list[tuple[int, int]]:
+    if [p for p, _, _ in boundaries] != list(range(1, len(boundaries) + 1)) or len(boundaries) < 4:
+        raise ValueError('every period boundary must be explicitly printed')
+    if boundaries[-1][1:] != (home_final, away_final):
+        raise ValueError('printed final disagrees with the warehouse result')
+    if any(h != a for p, h, a in boundaries[:-1] if p >= 4):
+        raise ValueError('printed overtime boundary is not tied')
+    result = [(h - hp, a - ap) for (_, h, a), (_, hp, ap) in zip(boundaries, [(0, 0, 0), *boundaries])]
+    if any(min(h, a) < 0 for h, a in result):
+        raise ValueError('printed cumulative scores decrease')
+    return result
+
+
+def publish_verified_boundaries(c, scans: Path = SCANS) -> None:
+    fieldnames = Path(__file__).with_name('newspaper_period_boundaries.csv')
+    groups: dict[str, list[dict]] = {}
+    with fieldnames.open(newline='') as file:
+        for row in csv.DictReader(file):
+            groups.setdefault(row['game_id'], []).append(row)
+    with warehouse_transaction(c):
+        c.execute('''CREATE TABLE IF NOT EXISTS audit.period_receipt_newspaper (
+            game_id VARCHAR PRIMARY KEY, page_url VARCHAR, ocr_url VARCHAR, ocr_sha256 VARCHAR,
+            passage VARCHAR, recorded_at TIMESTAMPTZ)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS audit.period_receipt_newspaper_boundary (
+            game_id VARCHAR, through_period INTEGER, home_cumulative INTEGER, away_cumulative INTEGER,
+            page_url VARCHAR, edition VARCHAR, scan_sha256 VARCHAR, method VARCHAR,
+            PRIMARY KEY (game_id, through_period))''')
+        for gid, rows in groups.items():
+            if c.execute('SELECT 1 FROM core.fact_game_period_score WHERE game_id = ? LIMIT 1', [gid]).fetchone():
+                continue
+            if any(not (scans / r['scan_name']).is_file() for r in rows):
+                continue
+            for row in rows:
+                if hashlib.sha256((scans / row['scan_name']).read_bytes()).hexdigest() != row['scan_sha256']:
+                    raise ValueError(f"scan digest disagrees: {row['scan_name']}")
+            fixture = {(r['game_date'], int(r['home_team_id']), int(r['away_team_id'])) for r in rows}
+            result = c.execute('''SELECT g.game_date::VARCHAR, g.home_team_id, g.away_team_id, r.home_score, r.away_score
+                FROM core.dim_game g JOIN core.fact_game_result r USING (game_id) WHERE g.game_id = ?''', [gid]).fetchone()
+            if result is None or fixture != {result[:3]}:
+                raise ValueError(f'printed newspaper fixture disagrees: {gid}')
+            points = cumulative_periods([(int(r['through_period']), int(r['home_cumulative']), int(r['away_cumulative'])) for r in rows], *result[3:])
+            c.executemany('INSERT INTO core.fact_game_period_score VALUES (?,?,?,?)',
+                          [(gid, team, i, pts) for i, (hp, ap) in enumerate(points, 1) for team, pts in ((result[1], hp), (result[2], ap))])
+            c.executemany('''INSERT INTO audit.period_receipt_newspaper_boundary VALUES
+                (?,?,?,?,?,?,?,'derived_from_printed_cumulative')''',
+                [(gid, r['through_period'], r['home_cumulative'], r['away_cumulative'], r['page_url'], r['edition'], r['scan_sha256']) for r in rows])
+            c.execute('INSERT INTO audit.period_receipt_newspaper VALUES (?,?,NULL,NULL,?,now())',
+                      [gid, rows[0]['page_url'], 'Complete keyed cumulative boundaries verified against the two newspaper scans'])
+            c.execute("INSERT INTO audit.gap_attempt VALUES ('period_scores', ?, 'newspaper_verified', now(), 'admitted', 'derived_from_printed_cumulative')", [gid])
+            print(f'Verified newspaper period boundaries admitted: {gid}', flush=True)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--limit', type=int)
     ap.add_argument('--from-date', default='1946-01-01')
+    ap.add_argument('--team', help='limit to games involving this team name or nickname')
     a = ap.parse_args()
-    import duckdb
-    rc = duckdb.connect(str(DEFAULT_OUT), read_only=True)
-    todo = games(rc, a.limit, a.from_date)
-    rc.close()
+    with connect(DEFAULT_OUT, read_only=True) as rc:
+        todo = games(rc, None, a.from_date)
+    if a.team:
+        todo = [g for g in todo if any(a.team.lower() in name.lower() for name in g[4:6])]
+    todo = todo[:a.limit]
     print(len(todo), 'games to search', flush=True)
     found, attempts = [], []
-    for gid, day, ht, at, hn, an, hs, aws in todo:
-        hit = None
-        pages = 0
-        d1 = day.isoformat()
-        d2 = (day + dt.timedelta(days=1)).isoformat()
-        q = f'{hn.split()[-1]} {an.split()[-1]}'
-        url = f'{API}?q={quote(q)}&dates={d1}/{d2}&fo=json&c=25'
-        res = get(url, CACHE / 'search' / f'{gid}.json')
+    failed = False
+    for game in todo:
+        gid, day, _, _, hn, an, _, _ = game
         try:
-            results = json.loads(res or b'{}').get('results') or []
-        except ValueError:
-            results = []
-        for r in results:
-            page = r.get('id') or ''
-            m = re.search(r'/resource/(sn\w+)/(\d{4}-\d{2}-\d{2})/ed-(\d+)/\?sp=(\d+)', page)
-            if not m:
-                continue
-            pages += 1
-            meta = get(f'https://www.loc.gov/resource/{m[1]}/{m[2]}/ed-{m[3]}/?sp={m[4]}&fo=json',
-                       CACHE / 'page' / f'{m[1]}_{m[2]}_{m[3]}_{m[4]}.json')
-            try:
-                ocr_url = (json.loads(meta or b'{}').get('resource') or {}).get('fulltext_file')
-            except ValueError:
-                ocr_url = None
-            if not ocr_url:
-                continue
-            raw = get(ocr_url, CACHE / 'ocr' / f'{m[1]}_{m[2]}_{m[3]}_{m[4]}.txt')
-            text = ocr_text(raw)
-            p = parse(text, (keys(hn), hs), (keys(an), aws))
-            if p:
-                hit = (gid, ht, at, p[0], p[1], page, ocr_url, hashlib.sha256(raw).hexdigest(), p[2])
-                break
+            hit, pages, conflict = search_game(*game)
+        except (OSError, ValueError) as e:
+            print(gid, day, e, flush=True)
+            failed = True
+            break
         if hit:
             found.append(hit)
-        attempts.append((gid, 'admitted' if hit else 'not_found' if not pages else 'no_data',
-                         f'{pages} newspaper pages searched'))
+        attempts.append((gid, 'pending_scan' if hit else 'mismatch' if conflict else 'no_data' if pages else 'not_found',
+                         f'{pages} newspaper pages checked' + ('; conflicting period lines' if conflict else '')))
         print(gid, day, hn, 'v', an, 'FOUND' if hit else f'- ({pages} pages)', flush=True)
-    with warehouse_lock():
-        c = connect(DEFAULT_OUT)
-        c.execute('''CREATE TABLE IF NOT EXISTS audit.period_receipt_newspaper (game_id VARCHAR PRIMARY KEY, page_url VARCHAR,
-            ocr_url VARCHAR, ocr_sha256 VARCHAR, passage VARCHAR, recorded_at TIMESTAMPTZ)''')
-        have = {r[0] for r in c.execute('SELECT DISTINCT game_id FROM core.fact_game_period_score').fetchall()}
-        for gid, ht, at, h, aw, page, ocr, sha, passage in found:
-            if gid in have:
-                continue
-            c.executemany('INSERT INTO core.fact_game_period_score VALUES (?,?,?,?)',
-                          [(gid, ht, i + 1, v) for i, v in enumerate(h)] + [(gid, at, i + 1, v) for i, v in enumerate(aw)])
-            c.execute('INSERT OR REPLACE INTO audit.period_receipt_newspaper VALUES (?,?,?,?,?,now())', [gid, page, ocr, sha, passage])
-        c.execute('CREATE OR REPLACE TEMP TABLE relog (game_id VARCHAR)')
-        if attempts:
-            c.executemany('INSERT INTO relog VALUES (?)', [(x[0],) for x in attempts])
-            c.execute("DELETE FROM audit.gap_attempt WHERE domain = 'period_scores' AND source = ? AND game_id IN (SELECT game_id FROM relog)", [SOURCE])
-            c.executemany("INSERT INTO audit.gap_attempt VALUES ('period_scores', ?, ?, now(), ?, ?)", [(g, SOURCE, o, n) for g, o, n in attempts])
+    with warehouse_lock(), connect(DEFAULT_OUT) as c:
+        c.execute('BEGIN')
+        try:
+            c.execute('''CREATE TABLE IF NOT EXISTS audit.period_candidate_newspaper (
+                game_id VARCHAR, home_team_id BIGINT, away_team_id BIGINT, home_periods INTEGER[], away_periods INTEGER[],
+                page_url VARCHAR, ocr_url VARCHAR, ocr_sha256 VARCHAR, passage VARCHAR, captured_at TIMESTAMPTZ,
+                PRIMARY KEY (game_id, page_url, ocr_sha256))''')
+            if found:
+                c.executemany('INSERT OR IGNORE INTO audit.period_candidate_newspaper VALUES (?,?,?,?,?,?,?,?,?,now())', found)
+            if attempts:
+                c.executemany("INSERT INTO audit.gap_attempt VALUES ('period_scores', ?, ?, now(), ?, ?)",
+                              [(g, SOURCE, o, n) for g, o, n in attempts])
+            c.execute('COMMIT')
+        except BaseException:
+            c.execute('ROLLBACK')
+            raise
         c.execute('CHECKPOINT')
-        c.close()
-    print('admitted', len(found), 'of', len(todo), flush=True)
+    print(len(found), 'OCR candidates for scan verification out of', len(todo), 'target games', flush=True)
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':

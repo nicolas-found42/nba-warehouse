@@ -99,3 +99,114 @@ Gap ledger after ESPN:
 | Starting lineups | source_unavailable | 46 |
 | Player box | partial / source_unavailable | 19 / 7 |
 | Team box | partial / source_unavailable | 6 / 6 |
+
+## November 25 issue follow-up
+
+The current per-game disposition is in `audit.gap_disposition`. It includes the most recent result and note for each
+source. NBA statistics and copies of the same data count as one failed source. Timeouts, connection refusals and
+access restrictions establish only that the requested route could not be checked on that run.
+
+### Archived plays, shots and lineups
+
+- Older play-by-play can name the scoring side only in the matchup folder and scoring tags. Recovering that orientation
+  admitted 28 additional archived fixtures. The loader still checks the final and records the local file digest for new
+  admissions. Shot rows include resolved shooters only, with geometry unavailable. Some early pages are static
+  SportsTicker boxes and carry a printed quarter table and named positions. Other captures are empty layouts or have
+  truncated play logs. [Wayback CDX](https://web.archive.org/cdx/search/cdx?url=nba.com/games/20061005/*&output=json)
+- Score tags retain their printed values. Inconsistent intermediate score changes are recorded in
+  `audit.nba_archive_score_anomaly`. Older pages can use uppercase `OFFICIALS` in a game-keyed element. That layout
+  exposes some two-person crews and improves the evidence for those gaps. A cached CDX index or successfully retrieved
+  page is required to count an archive failure.
+- In the five All-Star gaps, the 1997 archive is a final box score, the original 2000 ESPN GameFlow asset is missing,
+  and the 2001 original box and recap have no event list. The 2002 archived live page carries the final and the last
+  14 events. The 2003 capture does not contain a complete event list. ESPN data for 2002 still reads 0–0 at the end,
+  and its 2003 cumulative scores diverge from the published period totals from the first period onward.
+  [1997 NBA box](https://web.archive.org/web/20121016144317/http:/www.nba.com/history/allstar/boxscore_1997.html)
+  [2000 ESPN GameFlow](https://assets.espn.go.com/premium/nba/2000/20000213/gameflow/easwes.html)
+  [2001 ESPN box](https://assets.espn.go.com/nba/2001/20010211/boxscore/weseas.html)
+  [2002 live capture](https://web.archive.org/web/20020407104932id_/http://www.nba.com:80/games/20020210/WSTEST/livestats.html)
+  [2003 live capture](https://web.archive.org/web/20030211145742id_/http://www.nba.com:80/games/20030209/WSTEST/livestats.html)
+- The November 25 coverage rebuild reports 144 unavailable fixtures in each of plays and shots. In each domain,
+  140 have three independently counted failed sources and four have two. Each fixture has a per-game attempt note
+  in `audit.gap_disposition`.
+
+### Period scores
+
+- Pittsburgh at Detroit on November 20, 1946 has a complete set of printed cumulative boundaries across two newspapers.
+  The four quarter scores are derived from those observations and recorded with scan digests in
+  `audit.period_receipt_newspaper_boundary`. Two Chicago–New York games yielded partial period evidence only.
+  [Pittsburgh Post-Gazette, p. 18](https://news.google.com/newspapers?id=hygjAAAAIBAJ&sjid=AGoDAAAAIBAJ&pg=1056%2C1625520)
+  [The Pittsburgh Press, p. 35](https://news.google.com/newspapers?id=p1kbAAAAIBAJ&sjid=1EwEAAAAIBAJ&pg=992%2C2167811)
+- The Deseret News printed all four quarters for Dallas–Utah on October 5, 2003. The contemporary Dallas report prints
+  the same team vectors, with the date and Mexico City venue. `audit.period_receipt_publication` holds both digests.
+  [Deseret News box score](https://deseret.com/2003/10/6/19788454/jazz-90-mavericks-85)
+  [Dallas report](https://eskimo.com/~pbender/mavs/mavs-news/older/03summer/mavs10-6)
+- Two October 23, 2004 preseason games had the same 91–89 final. Their ESPN event records identify the designated
+  teams and include complete line scores. The October 12, 2005 Hawaii preseason game has an exact venue and local
+  date match. A duplicate ESPN event for that game carries the previous game's quarter totals and was rejected.
+  [Toronto at Chicago](https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=241023004)
+  [Dallas at Milwaukee](https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=241023015)
+  [Golden State at Los Angeles](https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=251013013)
+- The broadened Chronicling America query timed out on its first Washington game. The earlier per-game searches and
+  Basketball-Reference or bulk checks remain in the ledger. Google News Archive supplied readable Pittsburgh issues.
+  Brooklyn Newsstand points to its Newspapers.com partner. Exact-page checks on the New York and California archive
+  routes encountered access controls. Most early gaps still have blank, incomplete or non-reconciling source lines.
+  `audit.period_candidate_newspaper` keeps OCR leads pending scan verification.
+  [Chronicling America](https://www.loc.gov/collections/chronicling-america/)
+  [Brooklyn Newsstand](https://www.bklynlibrary.org/online-resources/brooklyn-newsstand)
+  [NYS Historic Newspapers](https://nyshistoricnewspapers.org/)
+  [California Digital Newspaper Collection](https://cdnc.ucr.edu/)
+
+### Crews, club boxes and unnamed players
+
+- USA TODAY's preseason summaries publish named 12:00 first-quarter starting-lineup events and referee names. The
+  loader confirms the date, team-keyed final and player identities before staging those names. A known outside-venue
+  home-designation difference requires the same venue and identical team-keyed scores. Seven international fixture
+  searches produced no matching USA TODAY summaries. Two broadcast leads remain unverified for visible starter cards.
+  [2005 lineup example](https://sportsdata.usatoday.com/basketball/nba/summary/661118)
+  [2006 lineup example](https://sportsdata.usatoday.com/basketball/nba/summary/713521)
+  [Spurs–ASVEL broadcast](https://www.youtube.com/watch?v=QHSwrRIeCFo)
+  [Maccabi–Toronto broadcast](https://www.youtube.com/watch?v=iPwq5MuosLs)
+- Hürriyet prints independently dated, score-matched three-person crews for the Efes–Denver and Efes–Golden State
+  preseason games. Their published scoring summaries do not contain full player boxes. The Denver quarter totals
+  disagree within the article and were held. [Denver report](https://www.hurriyet.com.tr/sporarena/efesin-gucu-nbali-denvera-yetmedi-118-102-5236475)
+  [Golden State report](https://www.hurriyet.com.tr/sporarena/golden-state-warriors-120-efes-pilsen-66-5251233)
+- CSKA's October 11, 2006 box supplies all 11 played CSKA rows, shows its five starters and corroborates the missing
+  Steven Smith line for Philadelphia. The two teams' player points total 71 and 85. The October 7 game corroborates ten
+  CSKA player identities on the old NBA IDs. The club's season profile and the contemporary roster establish the
+  Pashutin/Pachoutine alias. One DNP lacks a verified NBA ID and remains in `audit.club_box_receipt`.
+  [October 11 box](https://old.cskabasket.ru/gm/?a=boxscore&id=360&lang=en)
+  [October 7 box](https://old.cskabasket.ru/gm/?a=boxscore&id=332&lang=en)
+  [Pashutin club profile](https://old.cskabasket.ru/team/?lang=en&player=1&season=55)
+  [Contemporary roster](https://www.solobasket.com/internacional/euroliga-2006-2007-cska-moscow)
+- Twelve blank NBA.com player names were resolved from cached same-fixture NBA and ESPN stat lines or unique roster
+  remainders. The NBA IDs are preserved. Nineteen still lack reproducible links, including DNP groups without names,
+  jersey numbers or distinctive stats. The legacy Petteri Koponen profile appears in the index under the exact NBA ID.
+  A fresh fetch was blocked. The ESPN fixture validator uses verified numerical identities for eight foreign clubs
+  whose abbreviated labels differ. [Indexed NBA profile](http://nba.com/players/petteri/koponen/1962937467)
+- Deseret News prints the complete Chicago and Indiana team shooting lines for October 8, 2003. Unprinted fields remain
+  null. Philadelphia's March 3, 1950 box includes a documented own basket credited to the team. The published shooting
+  totals account for 64 points and the opposition basket contributes two to the official 66. [Chicago–Indiana box](https://deseret.com/2003/10/9/19789070/pacers-96-bulls-82)
+  [Philadelphia–Minneapolis box](https://www.basketball-reference.com/boxscores/195003030PHW.html)
+  [Contemporary scoring research](https://sports-reference.com/blog/2019/03/own-goals-added-to-nba-aba-box-scores)
+
+### Pregame source limits
+
+- The NBA PDF cache keeps printed timestamps, statuses and notices. The season mirror covers 2019–2027 and contains
+  selected pregame snapshots. Strict pregame queries corroborate identities with the roster available at the cutoff.
+  Final-report reconciliation can use the later game box and keeps unresolved source player IDs. The direct historical
+  PDF backfill is resumable, with each completed month published separately. Further historical PDFs remain to be fetched.
+  [NBA report source](https://www.nba.com/players/injury-report)
+  [Mirror build and selection rules](https://github.com/llimllib/nba_data/blob/main/pipeline/injury_report.py)
+- The roster mirror exposes actual capture timestamps in its current-season raw files. The initial import covers
+  November 5–25, 2026 across all 30 teams. Historical opening-night lists and date-only transaction evidence are useful
+  anchors with limited intraday resolution. Schedule captures are versioned so an earlier cutoff still sees the original
+  schedule. [Roster schema](https://github.com/llimllib/nba_data/blob/d3941f7b3105973ef77bf21409eb6bd9c2b65903/docs/DATA_DICTIONARY.md#L656-L675)
+  [Raw NBA roster capture](https://basketball-data.billmill.org/nba/raw/stats/2027/team_rosters/2026-11-24.json.gz)
+  [NBA movement feed](https://stats.nba.com/js/data/playermovement/NBA_Player_Movement.json)
+- The original Pinnacle source dictionary does not specify timezone or quote publication time. Its dashboard groups the
+  field as first and last seen. `betting.pinnacle_match_review` retains ambiguous links, unmatched rows and disagreements
+  with the publisher crosswalk. Timestamped Kaggle feeds can enter the pregame views only for verified fixture links and
+  reported times strictly before tip-off, including when the publisher labels a quote as a close.
+  [Publisher dictionary](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/csv/nba/data_dictionary.csv#L364-L401)
+  [Publisher dashboard](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/projects/db-viz/pages/09_Odds_and_Betting.py#L61-L98)
