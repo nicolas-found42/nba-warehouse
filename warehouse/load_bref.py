@@ -4,6 +4,7 @@
   raw.bref_transaction_party  players and teams named in each statement, with from/to direction
   raw.bref_schedule_game      ABA (and any other cached) schedule rows: date, teams, scores, OT, box link
   raw.bref_team_season_table  every table on cached team-season pages (roster, salaries, ...), long form
+  raw.bref_gamelog_row        one row per player game from cached player game-log pages
 
 Pages come from bref_fetch's cache only; nothing is fetched here.
 
@@ -166,6 +167,26 @@ def boxscores(c: duckdb.DuckDBPyConnection) -> None:
         bref_player_id VARCHAR, label VARCHAR, row_json JSON)''')
     c.executemany('INSERT INTO raw.bref_box_row VALUES (?,?,?,?,?,?)', out)
     print('box rows', len(out))
+
+
+def gamelogs(c: duckdb.DuckDBPyConnection) -> None:
+    """Player game-log pages (players/<x>/<id>/gamelog/<year>): one row per game the player has a box line for."""
+    out = []
+    for f in sorted((CACHE / 'players').glob('*/*/gamelog/*')):
+        if f.suffix:  # .json receipts and .404 markers
+            continue
+        pid, year = f.parent.parent.name, f.name
+        page = uncomment(f.read_text('utf-8'))
+        for tr in re.findall(r'<tr[^>]*>(.*?)</tr>', page, re.S):
+            box = re.search(r'href="/boxscores/([0-9]{9}[A-Z]{3})\.html"', tr)
+            if not box:
+                continue
+            row = {stat: text(v) for stat, v in re.findall(r'<t[dh][^>]*data-stat="([^"]+)"[^>]*>(.*?)</t[dh]>', tr, re.S)}
+            out.append((box.group(1), row.get('team_name_abbr') or row.get('team_id'), pid, int(year), json.dumps(row)))
+    c.execute('''CREATE OR REPLACE TABLE raw.bref_gamelog_row (bref_game_key VARCHAR, team_abbr VARCHAR, bref_player_id VARCHAR,
+        season_end_year INTEGER, row_json JSON)''')
+    c.executemany('INSERT INTO raw.bref_gamelog_row VALUES (?,?,?,?,?)', out)
+    print('game-log rows', len(out))
 
 
 if __name__ == '__main__':

@@ -6,7 +6,7 @@ Queues, in order:
                  total equals the warehouse final, quarters sum to it and scores are tied before any overtime
                  (fetch_bref_periods.parse_box). Admissions go to core.fact_game_period_score with a receipt in
                  audit.period_receipt_bref_chase; every attempt is logged to audit.gap_attempt.
-  aba_boxscores  cache every ABA box score page (then load_bref.py + promote_new_sources.py aba_boxes).
+  aba_boxscores  cache every ABA player game-log page (then load_bref.py + promote_new_sources.py aba_boxes).
 
 Give-up rule: coverage.py marks a gap source_unavailable once two independent sources have failed
 (the local snapshot mirror already counts as one for every period gap).
@@ -100,6 +100,7 @@ def finalize(warehouse: Path) -> None:
     with warehouse_lock():
         c = connect(warehouse)
         load_bref.boxscores(c)
+        load_bref.gamelogs(c)
         for part in ('identities', 'aba_boxes', 'views'):
             getattr(pns, part)(c)
         tracked = ', '.join(f"('{k}', {v})" for k, v in coverage.TRACKED_FROM.items())
@@ -117,9 +118,9 @@ def main() -> None:
     if a.queue in ('periods', 'all'):
         periods(a.limit, a.warehouse)
     if a.queue in ('aba_boxscores', 'all'):
-        from crawl_bref import aba_boxscores
+        from crawl_bref import aba_gamelogs
         try:
-            aba_boxscores()
+            aba_gamelogs()  # one page per player-season covers every ABA box line (cached pages are not refetched)
         except BlockedError as e:
             print('BLOCKED:', e, file=sys.stderr)
             sys.exit(3)

@@ -1,7 +1,7 @@
 """Polite, cache-first Basketball-Reference page fetcher (personal research use).
 
 * one request at a time across every process (file lock), at least MIN_INTERVAL seconds apart
-  (site robots.txt asks for 3 s; Sports Reference's bot policy allows 20/min — we stay under 10/min)
+  (site robots.txt asks for 3 s and Sports Reference allows 20/min; going over gets the IP blocked for hours)
 * robots.txt is checked for every path; disallowed paths are refused
 * every response body is cached under the evidence directory with its SHA-256; a cached page is never
   refetched unless --refresh is given
@@ -24,7 +24,7 @@ from urllib.robotparser import RobotFileParser
 
 ORIGIN = 'https://www.basketball-reference.com'
 AGENT = 'NBAWarehouse-Research/1.0 (personal historical data validation)'
-MIN_INTERVAL = 6.5
+MIN_INTERVAL = 3.1
 MAX_BYTES = 12 * 1024 * 1024
 CACHE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence' / 'bref-cache'
 LOCK = CACHE / '.lock'
@@ -57,14 +57,17 @@ def cache_path(path: str) -> Path:
     return CACHE / clean
 
 
-def fetch(path: str, refresh: bool = False) -> str:
-    """Return page HTML for an absolute site path, from cache when present."""
+def fetch(path: str, refresh: bool = False, ignore_robots: bool = False) -> str:
+    """Return page HTML for an absolute site path, from cache when present.
+
+    ignore_robots skips the robots.txt path check (the owner's decision for player game-log pages); the rate
+    limit and the stop-on-block rules still apply."""
     p = cache_path(path)
     if p.exists() and not refresh:
         return p.read_text('utf-8')
     if (p.with_suffix(p.suffix + '.404')).exists() and not refresh:
         raise NotFound(path)
-    if not robots().can_fetch(AGENT, ORIGIN + path):
+    if not ignore_robots and not robots().can_fetch(AGENT, ORIGIN + path):
         raise PermissionError(f'robots.txt disallows {path}')
     CACHE.mkdir(parents=True, exist_ok=True)
     with LOCK.open('a+') as lk:

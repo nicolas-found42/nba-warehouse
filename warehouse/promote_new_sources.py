@@ -363,25 +363,97 @@ def salaries(c) -> None:
                 c.execute('SELECT count(*) FROM sal_all').fetchone()[0])
 
 
+BOX_STATS = ('fg', 'fga', 'fg3', 'fg3a', 'ft', 'fta', 'orb', 'drb', 'trb', 'ast', 'stl', 'blk', 'tov', 'pf', 'pts')
+KAGGLE_COL = {'fg': 'FG', 'fga': 'FGA', 'fg3': '3P', 'fg3a': '3PA', 'ft': 'FT', 'fta': 'FTA', 'orb': 'ORB', 'drb': 'DRB',
+              'trb': 'TRB', 'ast': 'AST', 'stl': 'STL', 'blk': 'BLK', 'tov': 'TOV', 'pf': 'PF', 'pts': 'PTS'}
+
+
+def load_kaggle_aba_box(c) -> bool:
+    """raw_kaggle.gonzalo_aba_box: the nine ABA_*_basic tables of Kaggle gonzalogigena/nba-all-time-stats (loaded by
+    load_kaggle.py), stacked. Player rows scraped from Basketball-Reference box pages, keyed by the same game and
+    player ids; no team-total rows."""
+    tabs = [r[0] for r in c.execute("""SELECT table_name FROM duckdb_tables() WHERE schema_name = 'raw_kaggle'
+        AND table_name LIKE 'gonzalogigena_nba_all_time_stats__boxscores_by_year_aba_%_basic' ORDER BY 1""").fetchall()]
+    if not tabs:
+        return False
+    union = ' UNION ALL BY NAME '.join(f"SELECT *, '{t}' AS source_table FROM raw_kaggle.{t}" for t in tabs)
+    c.execute(f'''CREATE OR REPLACE TABLE raw_kaggle.gonzalo_aba_box AS
+        SELECT *, row_number() OVER (PARTITION BY "Game Reference", "Team") AS row_index FROM ({union})''')
+    return True
+
+
 def aba_boxes(c) -> None:
-    """ABA team and player box scores from cached Basketball-Reference box pages (raw.bref_box_row)."""
-    if not c.execute("SELECT count(*) FROM duckdb_tables() WHERE schema_name='raw' AND table_name='bref_box_row'").fetchone()[0]:
+    """ABA team and player box scores.
+
+    Source per game, best first: the Basketball-Reference box page (raw.bref_box_row); else per player the
+    Basketball-Reference game-log line (raw.bref_gamelog_row), else the Kaggle scrape of the box pages
+    (raw_kaggle.gonzalo_aba_box), with team totals the sum of the player rows (box_source 'player_sum'). Games present in both are compared field by field in audit.aba_box_source_compare.
+    """
+    has_page = c.execute("SELECT count(*) FROM duckdb_tables() WHERE schema_name='raw' AND table_name='bref_box_row'").fetchone()[0] > 0
+    has_kaggle = load_kaggle_aba_box(c)
+    if not (has_page or has_kaggle):
         print('aba_boxes: no box pages loaded yet'); return
     n = "try_cast(r.row_json->>'{f}' AS INTEGER)"
-    stats = ', '.join(f"{n.format(f=f)} AS {f}" for f in ('fg', 'fga', 'fg3', 'fg3a', 'ft', 'fta', 'orb', 'drb', 'trb', 'ast', 'stl', 'blk', 'tov', 'pf', 'pts'))
+    page_stats = ', '.join(f"{n.format(f=f)} AS {f}" for f in BOX_STATS)
+    kg_stats = ', '.join(f'try_cast(try_cast(r."{KAGGLE_COL[f]}" AS DOUBLE) AS INTEGER) AS {f}' for f in BOX_STATS)
+    parts = []
+    if has_page:
+        parts.append(f'''SELECT 'bref_page' AS box_source, r.bref_game_key, r.team_abbr, r.row_index, r.bref_player_id, r.label,
+                   r.row_json->>'mp' AS minutes_text, r.row_json->>'reason' AS dnp_reason, {page_stats}
+            FROM raw.bref_box_row r WHERE r.bref_game_key IN (SELECT bref_game_key FROM core.aba_game_key)''')
+    if has_kaggle:
+        page_games = "SELECT DISTINCT bref_game_key FROM raw.bref_box_row" if has_page else "SELECT NULL"
+        parts.append(f'''SELECT 'kaggle_gonzalo' AS box_source, r."Game Reference" AS bref_game_key, r."Team" AS team_abbr,
+                   r.row_index::INTEGER AS row_index, r."Player Reference" AS bref_player_id, r."Player Name" AS label,
+                   r."MP" AS minutes_text, r."Reason" AS dnp_reason, {kg_stats}
+            FROM raw_kaggle.gonzalo_aba_box r''')
+        c.execute(f'CREATE OR REPLACE TEMP TABLE kbox AS {parts[-1]}')
+        has_log = c.execute("SELECT count(*) FROM duckdb_tables() WHERE schema_name='raw' AND table_name='bref_gamelog_row'").fetchone()[0] > 0
+        # games without a box page: the player's game-log line where we have one (complete fields), else the Kaggle row
+        log = (f'''SELECT 'bref_gamelog' AS box_source, r.bref_game_key, r.team_abbr, 0 AS row_index, r.bref_player_id,
+                   r.bref_player_id AS label, r.row_json->>'mp' AS minutes_text, r.row_json->>'reason' AS dnp_reason, {page_stats}
+            FROM raw.bref_gamelog_row r WHERE r.bref_game_key IN (SELECT bref_game_key FROM kbox)''' if has_log else
+               "SELECT * FROM kbox WHERE false")
+        c.execute(f'''CREATE OR REPLACE TEMP TABLE nonpage AS
+            WITH g AS ({log})
+            SELECT * FROM g WHERE bref_game_key NOT IN ({page_games})
+            UNION ALL SELECT * FROM kbox k WHERE bref_game_key NOT IN ({page_games})
+              AND NOT EXISTS (SELECT 1 FROM g WHERE g.bref_game_key = k.bref_game_key AND g.bref_player_id = k.bref_player_id)''')
+        # team totals for these games: sum of the player rows
+        tot = ', '.join(f'sum({f})::INTEGER' for f in BOX_STATS)
+        parts[-1] = f'''SELECT * FROM nonpage
+            UNION ALL SELECT 'player_sum', bref_game_key, team_abbr, 9999, NULL, 'Team Totals', NULL, NULL, {tot}
+            FROM nonpage GROUP BY bref_game_key, team_abbr'''
+    c.execute(f'CREATE OR REPLACE TEMP TABLE abox_src AS {" UNION ALL ".join(parts)}')
     c.execute(f'''CREATE OR REPLACE TEMP TABLE abox AS
-        SELECT k.game_id, g.season_start + 1 AS season_end_year, r.team_abbr, r.bref_player_id, r.label,
+        SELECT k.game_id, g.season_start + 1 AS season_end_year, r.box_source, r.team_abbr, r.bref_player_id, r.label,
                {BREF_TEAM.format(k='r.team_abbr', y='g.season_start + 1')} AS team_id,
                {BREF_PERSON.format(k='r.bref_player_id')} AS person_id,
-               r.row_json->>'mp' AS minutes_text, r.row_json->>'reason' AS dnp_reason, {stats}
-        FROM raw.bref_box_row r JOIN core.aba_game_key k ON k.bref_game_key = r.bref_game_key
+               r.minutes_text, r.dnp_reason, {', '.join(BOX_STATS)}
+        FROM abox_src r JOIN core.aba_game_key k ON k.bref_game_key = r.bref_game_key
         JOIN core.aba_game g ON g.game_id = k.game_id''')
+    if has_page and has_kaggle:
+        diff = ' OR '.join(f'p.{f} IS DISTINCT FROM k.{f}' for f in BOX_STATS)
+        c.execute(f'''CREATE OR REPLACE TABLE audit.aba_box_source_compare AS
+            WITH p AS (SELECT bref_game_key, team_abbr, bref_player_id, {page_stats.replace('r.row_json', 'row_json')}
+                       FROM raw.bref_box_row r WHERE bref_player_id IS NOT NULL
+                         AND bref_game_key IN (SELECT bref_game_key FROM core.aba_game_key)
+                         AND bref_game_key IN (SELECT bref_game_key FROM kbox)),
+                 k AS (SELECT * FROM kbox WHERE bref_game_key IN (SELECT bref_game_key FROM p))
+            SELECT coalesce(p.bref_game_key, k.bref_game_key) AS bref_game_key, coalesce(p.team_abbr, k.team_abbr) AS team_abbr,
+                   coalesce(p.bref_player_id, k.bref_player_id) AS bref_player_id,
+                   CASE WHEN p.bref_player_id IS NULL THEN 'kaggle_only' WHEN k.bref_player_id IS NULL THEN 'page_only'
+                        WHEN {diff} THEN 'values_differ' ELSE 'identical' END AS outcome,
+                   to_json(p) AS page_row, to_json(k) AS kaggle_row
+            FROM p FULL JOIN k ON p.bref_game_key = k.bref_game_key AND p.team_abbr = k.team_abbr AND p.bref_player_id = k.bref_player_id''')
+        print('aba box source compare:', c.execute('SELECT outcome, count(*) FROM audit.aba_box_source_compare GROUP BY 1 ORDER BY 1').fetchall())
     c.execute('''CREATE OR REPLACE TABLE core.aba_team_game_stats AS
         SELECT game_id, team_id, fg AS fgm, fga, fg3 AS fg3m, fg3a, ft AS ftm, fta, orb AS oreb, drb AS dreb, trb AS reb, ast, stl, blk,
-               tov, pf, pts FROM abox WHERE label = 'Team Totals' AND team_id IS NOT NULL''')
+               tov, pf, pts, box_source FROM abox WHERE label = 'Team Totals' AND team_id IS NOT NULL''')
     c.execute('''CREATE OR REPLACE TABLE core.aba_player_game_stats AS
         SELECT game_id, person_id, team_id, CASE WHEN dnp_reason IS NOT NULL THEN 'did_not_play' ELSE 'played' END AS participation_status,
-               minutes_text, fg AS fgm, fga, fg3 AS fg3m, fg3a, ft AS ftm, fta, orb AS oreb, drb AS dreb, trb AS reb, ast, stl, blk, tov, pf, pts
+               minutes_text, fg AS fgm, fga, fg3 AS fg3m, fg3a, ft AS ftm, fta, orb AS oreb, drb AS dreb, trb AS reb, ast, stl, blk, tov, pf, pts,
+               box_source
         FROM abox WHERE label <> 'Team Totals' AND label <> 'Reserves' AND label <> 'Starters' AND person_id IS NOT NULL AND team_id IS NOT NULL''')
     c.execute("DELETE FROM audit.domain_held WHERE domain = 'aba_player_game_stats'")
     c.execute('''INSERT INTO audit.domain_held SELECT 'aba_player_game_stats', NULL,
@@ -394,7 +466,7 @@ def aba_boxes(c) -> None:
                (SELECT sum(p.pts) FROM core.aba_player_game_stats p WHERE p.game_id = t.game_id AND p.team_id = t.team_id) AS player_pts
         FROM core.aba_team_game_stats t JOIN core.aba_game g USING (game_id) JOIN core.aba_game_result r USING (game_id)''')
     print('aba boxes: teams', c.execute('SELECT count(*), count(*) FILTER (WHERE team_pts = final_pts), count(*) FILTER (WHERE player_pts = team_pts) FROM audit.aba_box_check').fetchone())
-    disposition(c, 'aba_player_game_stats', 'raw.bref_box_row (ABA)',
+    disposition(c, 'aba_player_game_stats', 'raw.bref_box_row + raw_kaggle.gonzalo_aba_box (ABA)',
                 c.execute("SELECT count(*) FROM abox WHERE label NOT IN ('Team Totals', 'Reserves', 'Starters')").fetchone()[0])
 
 

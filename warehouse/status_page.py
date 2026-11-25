@@ -22,7 +22,7 @@ OUT = DATA / 'status'
 EVIDENCE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence'
 CACHE = EVIDENCE / 'bref-cache'
 ET = ZoneInfo('America/New_York')
-SECONDS_PER_PAGE = 7.0  # 6.5 s polite gap + fetch time; replaced by the measured pace once there is one
+SECONDS_PER_PAGE = 3.4  # 3.1 s gap (Basketball-Reference allows 20 pages/min) + fetch time; replaced by the measured pace once there is one
 
 # Things that already happened (the one-time build), oldest first.
 MILESTONES = [
@@ -35,6 +35,8 @@ MILESTONES = [
     ('2026-11-24', 'Matched 537 more players across sources using Jev judgments; 609 players got new permanent ids.'),
     ('2026-11-24', 'Deleted the 35 old database copies and the Kaggle downloads after your approval (270 GB freed).'),
     ('2026-11-24', 'Published the code to GitHub (database stays on this Mac) and started the daily and nightly jobs.'),
+    ('2026-11-25', 'Filled in quarter scores for 1,220 old games (156 set aside because they did not add up to the final).'),
+    ('2026-11-25', 'Loaded box scores for all 4,149 ABA games at once from a Kaggle copy instead of waiting 7 hours for downloads; 8,288 of 8,298 team totals match the official final.'),
 ]
 
 
@@ -105,20 +107,29 @@ def chase_log() -> dict:
 
 
 def aba_pages() -> tuple[int, int]:
-    keys: set[str] = set()
-    for f in (CACHE / 'leagues').glob('ABA_*_games*.html'):
-        keys.update(re.findall(r'/boxscores/([0-9]{9}[A-Z]{3})\.html', f.read_text(errors='replace')))
-    have = sum((CACHE / 'boxscores' / f'{k}.html').exists() for k in keys)
-    return have, len(keys)
+    """ABA player game-log pages cached, out of the player-season count the crawler logged."""
+    have = sum(1 for f in (CACHE / 'players').glob('*/*/gamelog/*') if not f.suffix or f.suffix == '.404')
+    total = 1259
+    for name in ('aba-gamelogs.log', 'chase.log'):
+        p = DATA / 'crawl-logs' / name
+        if p.exists():
+            m = re.findall(r'^(\d+) ABA player game logs$', p.read_text(errors='replace'), re.M)
+            if m:
+                total = int(m[-1])
+    return min(have, total), total
+
+
+def gamelog_running() -> bool:
+    return subprocess.run(['pgrep', '-f', 'crawl_bref.py aba_gamelogs'], capture_output=True).returncode == 0
 
 
 def pace(history: list, key: str) -> float | None:
-    """Items per hour over the last ~2 hours of samples."""
+    """Items per hour over the last ~30 minutes of samples (short, so a change of pace shows quickly)."""
     pts = [(h['t'], h[key]) for h in history if h.get(key) is not None]
     if len(pts) < 2:
         return None
     t1, v1 = pts[-1]
-    older = [p for p in pts if t1 - p[0] <= 7200]
+    older = [p for p in pts if t1 - p[0] <= 1800]
     t0, v0 = older[0]
     if t1 - t0 < 600 or v1 <= v0:
         return None
@@ -132,7 +143,7 @@ def fmt_duration(hours: float) -> str:
         return f'about {round(hours * 60)} minutes'
     if hours < 36:
         h = round(hours * 2) / 2
-        return f'about {h:g} hours'
+        return 'about 1 hour' if h == 1 else f'about {h:g} hours'
     return f'about {round(hours / 24, 1):g} days'
 
 
@@ -184,11 +195,11 @@ def build() -> None:
     tasks.append({
         'name': 'Filling in missing quarter-by-quarter scores',
         'plain': 'About 1,650 games, mostly from the 1940s and 1950s, have a final score but no quarter scores. '
-                 'The job looks each one up on Basketball-Reference, one page every 7 seconds so it stays polite. '
+                 'The job looks each one up on Basketball-Reference, one page every 3 seconds, the fastest the site allows. '
                  'A quarter-score line is only kept if it adds up exactly to the official final.',
-        'status': 'problem' if chase['problem'] and not chase_job['running'] else 'running' if period_running else 'done' if remaining <= 0 and chase['queued'] else 'waiting',
+        'status': 'problem' if chase['problem'] and not chase_job['running'] else 'running' if period_running else 'done' if remaining <= 0 and chase['queued'] is not None else 'waiting',
         'done': chase['done'], 'total': chase['queued'] or 0, 'unit': 'games checked',
-        'detail': f"{chase['admitted']:,} filled in · {chase['no_data']:,} had no quarter scores on the page · {chase['mismatch']:,} didn't add up and were set aside",
+        'detail': 'Nothing left to look up in this run; the earlier run filled in 1,220 games.' if chase['queued'] == 0 else f"{chase['admitted']:,} filled in · {chase['no_data']:,} had no quarter scores on the page · {chase['mismatch']:,} didn't add up and were set aside",
         'eta': fmt_duration(remaining / rate) if remaining > 0 else None,
         'next': 'Then it starts collecting ABA box scores.' if remaining > 0 else 'Finished for now; the nightly run at 1 am picks up anything new.',
         'recent': [plain_event(l) for l in chase['recent']],
@@ -198,14 +209,16 @@ def build() -> None:
     aba_rate = pace(state['samples'], 'aba_pages') or 3600 / SECONDS_PER_PAGE
     aba_wait_hours = (remaining / rate if remaining > 0 else 0)
     tasks.append({
-        'name': 'Collecting ABA box scores (1967–1976)',
-        'plain': 'Every ABA game is already in the database with its final score. This step downloads each game\'s box score '
-                 '(who played and their stats) so the ABA has the same detail as the NBA.',
-        'status': 'done' if aba_left == 0 and aba_total else 'running' if chase_job['running'] and remaining <= 0 else 'waiting',
-        'done': aba_have, 'total': aba_total, 'unit': 'box scores downloaded',
-        'detail': 'Starts after the quarter-score job finishes.' if remaining > 0 else f'{aba_left:,} still to download',
-        'eta': fmt_duration(aba_wait_hours + aba_left / aba_rate) if aba_left else None,
-        'next': 'Then the box scores are checked (team points must equal the final score) and loaded.',
+        'name': 'Filling in full detail for ABA box scores (1967–1976)',
+        'plain': 'Every ABA game already has its box score, loaded from a Kaggle copy. That copy is missing some numbers '
+                 '(assists, rebounds, fouls, shot attempts in many rows). This step downloads each player\'s game log for each '
+                 'ABA season from Basketball-Reference (about 1,260 pages instead of 4,149 box score pages), one every 3 seconds, '
+                 'the fastest the site allows.',
+        'status': 'done' if aba_left == 0 and aba_total else 'running' if (chase_job['running'] or gamelog_running()) else 'waiting',
+        'done': aba_have, 'total': aba_total, 'unit': 'pages downloaded',
+        'detail': f'{aba_left:,} still to download',
+        'eta': fmt_duration(aba_left / aba_rate) if aba_left else None,
+        'next': 'Then the downloaded pages replace the Kaggle rows for those games.',
         'recent': [],
     })
     # 3. load ABA boxes
@@ -214,11 +227,12 @@ def build() -> None:
         'name': 'Loading and checking the ABA box scores',
         'plain': 'Reads the downloaded box scores, matches every player to the right person, and checks that the '
                  'team totals equal the official final score before anything goes into the main tables.',
-        'status': 'done' if loaded and aba_left == 0 else 'waiting',
+        'status': 'done' if loaded and aba_left == 0 else 'running' if not loaded else 'done',
         'done': loaded, 'total': db.get('aba_games') or aba_total, 'unit': 'games loaded',
-        'detail': 'Runs automatically right after the downloads finish.',
-        'eta': fmt_duration(aba_wait_hours + aba_left / aba_rate + 0.25) if aba_left else None,
-        'next': 'Then the coverage report below is recalculated.',
+        'detail': 'All games are in, with team totals checked against the official final score. '
+                  'It reloads automatically (about 30 seconds) once the full-detail pages finish downloading.',
+        'eta': None,
+        'next': 'The coverage report below is recalculated each time it reloads.',
         'recent': [],
     })
     # 4. daily update
