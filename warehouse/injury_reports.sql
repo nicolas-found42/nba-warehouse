@@ -57,9 +57,12 @@ WITH games AS (
     FROM core.dim_person WHERE display_name IS NOT NULL
 ), name_match AS (
     SELECT name_key, min(person_id) AS person_id FROM names GROUP BY name_key HAVING count(*) = 1
+), official_game_people AS (
+    SELECT game_id, team_id, person_id FROM core.fact_player_game_stats
+    UNION SELECT game_id, team_id, person_id FROM core.fact_inactive_player
 ), game_name_match AS (
     SELECT b.game_id, b.team_id, n.name_key, min(n.person_id) AS person_id
-    FROM core.fact_player_game_stats b JOIN names n USING (person_id)
+    FROM official_game_people b JOIN names n USING (person_id)
     WHERE b.game_id IN (SELECT game_id FROM pdf_guesses WHERE game_id IS NOT NULL)
     GROUP BY ALL HAVING count(DISTINCT n.person_id) = 1
 ), pdf AS (
@@ -83,7 +86,7 @@ WITH games AS (
                 WHEN b.person_id IS NULL THEN 'player_unresolved' ELSE 'linked' END AS resolution_status
     FROM raw.nba_injury_report_mirror m
     LEFT JOIN core.pregame_fixture g ON g.game_id = lpad(m.game_id, 10, '0') AND g.game_date = m.game_date
-    LEFT JOIN (SELECT DISTINCT game_id, team_id, person_id FROM core.fact_player_game_stats) b
+    LEFT JOIN official_game_people b
       ON b.game_id = g.game_id AND b.team_id = try_cast(m.team_id AS BIGINT) AND b.person_id = try_cast(m.player_id AS BIGINT)
 )
 SELECT * FROM pdf UNION ALL SELECT * FROM mirror;
@@ -149,5 +152,6 @@ WITH latest AS (
     SELECT * FROM core.injury_report_snapshot WHERE report_time < tipoff_at
     QUALIFY report_time = max(report_time) OVER (PARTITION BY game_id, team_id)
 )
-SELECT i.*, p.participation_status
-FROM latest i LEFT JOIN core.fact_player_game_stats p USING (game_id, team_id, person_id);
+SELECT i.*, p.participation_status, CASE WHEN o.person_id IS NOT NULL THEN true END AS official_inactive
+FROM latest i LEFT JOIN core.fact_player_game_stats p USING (game_id, team_id, person_id)
+LEFT JOIN core.fact_inactive_player o USING (game_id, team_id, person_id);

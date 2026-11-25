@@ -108,9 +108,9 @@ captured rosters even when the completed-game release is delayed.
 
 Use a timezone-bearing cutoff, such as `2026-11-25T16:00:00-05:00`, with `betting.odds_at(game_id, cutoff)`,
 `core.injury_report_at(game_id, cutoff)` and `core.roster_at(game_id, cutoff)`. `core.pregame_fixture` includes official
-schedule entries ahead of the results refresh. `core.injury_report_final_pregame` adds the separately observed participation
-status after the game. The as-of injury query links identities through rosters available at that cutoff. The final report
-can use the later game box. `audit.injury_report_resolution` records rows still missing a verified game, team or person match.
+schedule entries ahead of the results refresh. `core.injury_report_final_pregame` adds the later game box participation
+status and any official inactive list entry. The as-of injury query links identities through rosters available at that cutoff.
+`audit.injury_report_resolution` records rows still missing a verified game, team or person match.
 `core.pregame_fixture_at(game_id, cutoff)` uses versioned schedule captures and the original NBA schedule releases
 for 2021–22 through 2025–26 and the second half of 2020–21. Entries with an unresolved fixture or tip time
 remain in `audit.nba_initial_schedule_resolution`.

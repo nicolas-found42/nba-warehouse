@@ -59,6 +59,7 @@ def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():
             game_datetime_est TIMESTAMP, participant_status VARCHAR, result_status VARCHAR);
         INSERT INTO core.dim_game VALUES ('0022600001','2026-11-24',1,2,'2026-11-24 19:00','resolved','final');
         CREATE TABLE core.fact_player_game_stats(game_id VARCHAR,team_id BIGINT,person_id BIGINT,participation_status VARCHAR);
+        CREATE TABLE core.fact_inactive_player(game_id VARCHAR,team_id BIGINT,person_id BIGINT);
         INSERT INTO core.fact_player_game_stats VALUES ('0022600001',1,4,'played');''')
     day = dt.date(2026, 11, 24)
     reports = {Path(f'{i}.pdf'): (str(i), dt.datetime(2026, 11, 24, hour, tzinfo=ET), [
@@ -114,6 +115,14 @@ def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():
         ReportRow(day, 'PHI@SAS', 'San Antonio Spurs', 'One, Player', 'Probable', 'Alias test')] )})
     assert c.execute("SELECT team_id,status FROM core.injury_report_at('0022600002',TIMESTAMPTZ '2026-11-24 18:30:00-05')").fetchall() == [
         (5, 'Probable')]
+    c.execute('''INSERT INTO core.dim_person VALUES (7,'Player Known'),(8,'Player Known');
+        INSERT INTO core.fact_inactive_player VALUES ('0022600001',1,7);''')
+    publish(c, {Path('inactive.pdf'): ('inactive-source', dt.datetime(2026, 11, 24, 18, 50, tzinfo=ET), [
+        ReportRow(day, 'DET@ORL', 'Detroit Pistons', 'Known, Player', 'Out', '')])})
+    assert c.execute('''SELECT player_name,person_id,participation_status,official_inactive FROM core.injury_report_final_pregame
+        WHERE game_id='0022600001' ''').fetchall() == [('Known, Player', 7, None, True)]
+    assert c.execute("SELECT player_name,person_id FROM core.injury_report_at('0022600001',TIMESTAMPTZ '2026-11-24 18:50:00-05')").fetchall() == [
+        ('Known, Player', None)]
 
 
 def test_first_schedule_capture_remains_queryable_when_the_fixture_changes():

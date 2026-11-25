@@ -330,7 +330,8 @@ access restrictions establish only that the requested route could not be checked
 
 - Billmill serves copies of the original NBA PDFs, including the first 2018 report and samples through the
   2025–26 playoffs. Wayback CDX gives another list of official PDF URLs. The combined 2019–26 index contains
-  16,084 candidate filenames. Both indices are sampled and leave historical coverage incomplete. Original and
+  16,084 filenames, all with parsed rows in the warehouse. Both indices are sampled. A separate direct sweep checks
+  standard report slots for each NBA game day and the preceding day. Original and
   retrieval URLs and the byte digest are retained in `raw.nba_injury_report_retrieval`. The report’s printed
   Eastern timestamp controls eligibility. The provider changed legacy filenames to quarter-hour suffixes at
   9:00 a.m. Eastern on December 22, 2025.
@@ -338,6 +339,9 @@ access restrictions establish only that the requested route could not be checked
   [Example Wayback PDF index](https://web.archive.org/cdx/search/cdx?url=ak-static.cms.nba.com%2Freferee%2Finjury%2FInjury-Report_2025-12%2A&output=json&filter=statuscode%3A200&collapse=urlkey&fl=timestamp%2Coriginal%2Cstatuscode&limit=20)
   [Final hourly filename example](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2025-12-22_08AM.pdf)
   [First minute-qualified example](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2025-12-22_09_00AM.pdf)
+- The July 5, 2021 report labelled `08PM` prints 9:55 p.m. Eastern in both the direct PDF and archived copy.
+  The warehouse records that printed time with the original filename and retrieval provenance.
+  [Original NBA PDF](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2021-07-05_08PM.pdf)
 - The NBA index, Billmill's 2026–27 data and archived NBA index pages identify 520 October–November 2026 filenames.
   Quarter-hour slots on many days still need the direct NBA capture. The July archive names 77 Summer League files, all
   recovered. An October 1 archive copy labelled 12:45 p.m. prints a 12:56 p.m. Eastern timestamp. The warehouse keeps
@@ -353,7 +357,9 @@ access restrictions establish only that the requested route could not be checked
 
 - The NBA PDF cache keeps printed timestamps, statuses and notices. The season mirror covers 2019–2027 and contains
   selected pregame snapshots. Strict pregame queries corroborate identities with the roster available at the cutoff.
-  Final-report reconciliation can use the later game box and keeps unresolved source player IDs. The direct historical
+  Final-report reconciliation can use the later game box and official inactive list to verify a game-team identity.
+  The final view exposes available box-score participation and official inactive status in separate columns and keeps
+  unresolved source player IDs. The direct historical
   PDF backfill is resumable, with each completed month published separately. Further historical PDFs remain to be fetched.
   [NBA report source](https://www.nba.com/players/injury-report)
   [Mirror build and selection rules](https://github.com/llimllib/nba_data/blob/main/pipeline/injury_report.py)
@@ -391,7 +397,8 @@ access restrictions establish only that the requested route could not be checked
   field as first and last seen. `betting.pinnacle_match_review` retains ambiguous links, unmatched rows and disagreements
   with the publisher crosswalk. Timestamped Kaggle feeds can enter the pregame views only for verified fixture links and
   reported times strictly before tip-off, including when the publisher labels a quote as a close. Six sampled exact event
-  URLs served identical page shells without fixture metadata. Exact Wayback searches for those events yielded no captures.
+  URLs served identical page shells without fixture metadata. Wayback Availability and CDX returned successful empty
+  results for all 65 unresolved main-line event URLs. The local evidence folder retains each response and its digest.
   [Publisher dictionary](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/csv/nba/data_dictionary.csv#L364-L401)
   [Publisher dashboard](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/projects/db-viz/pages/09_Odds_and_Betting.py#L61-L98)
   [Sample Pinnacle event](https://www.pinnacle.com/en/basketball/nba/usa-stars-vs-usa-stripes/1624285681/)
