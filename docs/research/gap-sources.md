@@ -343,8 +343,9 @@ access restrictions establish only that the requested route could not be checked
   The warehouse records that printed time with the original filename and retrieval provenance.
   [Original NBA PDF](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2021-07-05_08PM.pdf)
 - The NBA index, Billmill's 2026–27 data and archived NBA index pages identify 520 October–November 2026 filenames.
-  Quarter-hour slots on many days still need the direct NBA capture. The July archive names 77 Summer League files, all
-  recovered. An October 1 archive copy labelled 12:45 p.m. prints a 12:56 p.m. Eastern timestamp. The warehouse keeps
+  All 520 are verified. The direct regular-season sweep published 3,417 PDFs from October 19 through November 23,
+  and the daily capture continued on November 24 and 25. An October 1 archive copy labelled 12:45 p.m. prints
+  a 12:56 p.m. Eastern timestamp. The warehouse keeps
   the original filename and retrieval route and uses the printed time. The five rows list Boston at Detroit on October 1.
   Neither team’s preseason schedule includes that fixture, so the rows stay unmatched. The NBA records the teams’ regular
   season opener on October 20.
@@ -354,6 +355,14 @@ access restrictions establish only that the requested route could not be checked
   [October 1 original replay](https://web.archive.org/web/20261002063922id_/https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-10-01_12_45PM.pdf)
   [Boston preseason schedule](https://www.nba.com/celtics/news/celtics-announce-2026-27-preseason-schedule)
   [Detroit schedule](https://www.nba.com/pistons/news/detroit-pistons-announce-2026-27-season-schedule-presented-by-ticketmaster)
+- The July sweep published 1,498 original Summer League reports across 2022–26, including all 77 files in the
+  initial 2026 July archive. A supplemental annual archive index contributed 129 verified filenames. On November 25,
+  the CDN returned explicit access-denied pages for several 2026 Summer League filenames previously verified as
+  reachable. The remaining July 2026 publication slots await verification. The local evidence folder retains the
+  exact URLs, response bodies and digests alongside the earlier valid PDFs.
+  [2022 Summer League schedule](https://www.nba.com/news/2022-nba-summer-league-schedules-las-vegas-san-francisco-and-salt-lake-city)
+  [2026 Summer League schedule](https://www.nba.com/news/2026-nba-summer-league-schedule)
+  [Verified July 17 original](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-07-17_11_30AM.pdf)
 
 - The NBA PDF cache keeps printed timestamps, statuses and notices. The season mirror covers 2019–2027 and contains
   selected pregame snapshots. Strict pregame queries corroborate identities with the roster available at the cutoff.
@@ -361,8 +370,9 @@ access restrictions establish only that the requested route could not be checked
   failures. Ordinary public retries recovered original PDFs after temporary CDN or archive responses failed to serve a PDF.
   Final-report reconciliation can use the later game box and official inactive list to verify a game-team identity.
   The final view exposes available box-score participation and official inactive status in separate columns and keeps
-  unresolved source player IDs. The direct historical
-  PDF backfill is resumable, with each completed month published separately. Further historical PDFs remain to be fetched.
+  unresolved source player IDs. The direct historical PDF backfill is resumable, with each completed month published
+  separately. The November 25 audit counted 41,963 original PDF filenames and 3,064,235 raw report rows, all with
+  retrieval provenance. The capture spans December 17, 2018 through November 25, 2026.
   [NBA report source](https://www.nba.com/players/injury-report)
   [Mirror build and selection rules](https://github.com/llimllib/nba_data/blob/main/pipeline/injury_report.py)
 - The roster mirror exposes actual capture timestamps in its current-season raw files. The initial import covers
