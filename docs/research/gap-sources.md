@@ -157,6 +157,28 @@ access restrictions establish only that the requested route could not be checked
   [Detroit box](https://www.basketball-reference.com/boxscores/195803150DET.html)
   [Golden State box](https://sportsdata.usatoday.com/basketball/nba/stats/541929)
   [Utah box](https://sportsdata.usatoday.com/basketball/nba/stats/661261)
+- Five more 2004 preseason finals agree across exact USA TODAY and ESPN games and the published team and player
+  scoring. Four have matching quarter vectors at both sources. Utah–New York ended 83–89 and both sources agree
+  through halftime. Their third- and fourth-quarter values disagree, so those periods are held. Philadelphia’s
+  corrected Utah box restores Aaron McKie’s published one point and leaves his playing time unresolved.
+  [Sacramento–Utah](https://sportsdata.usatoday.com/basketball/nba/stats/541891)
+  [New Orleans–Clippers](https://sportsdata.usatoday.com/basketball/nba/stats/541906)
+  [Utah–Philadelphia](https://sportsdata.usatoday.com/basketball/nba/stats/541916)
+  [Seattle–Phoenix](https://sportsdata.usatoday.com/basketball/nba/stats/541919)
+  [Utah–New York](https://sportsdata.usatoday.com/basketball/nba/stats/541932)
+- The March 31, 1951 New York–Syracuse playoff was 77–75 in overtime. A contemporary Associated Press box
+  confirms the final and 70–70 regulation score, and the original player points already reconcile. The cached
+  line score uses `1OT` for the fifth period, as does the March 26, 1950 Syracuse–New York game. The parser now
+  accepts contiguous overtime labels and requires a tie before each additional period.
+  [1951 Evening Star, image 32](https://www.loc.gov/resource/sn83045462/1951-04-01/ed-1/?sp=32)
+  [1950 Evening Star, image 18](https://www.loc.gov/resource/sn83045462/1950-03-27/ed-1/?sp=18)
+- Philadelphia’s March 26, 1958 playoff ended 112–97 against Boston. The Associated Press caption and the next
+  day’s New York Times report agree with the printed quarter and shooting totals. The original 111–97 entry
+  is preserved in the correction receipt. Boston–New York’s 92–78 game has a contemporaneously verified March
+  24, 1951 playing date. The ledger identifies the date discrepancy and preserves the old fixture date.
+  [1958 Philadelphia box](https://www.basketball-reference.com/boxscores/195803260PHW.html)
+  [March 27, 1958 New York Times index](https://www.nytimes.com/sitemap/1958/03/27/)
+  [Boston–New York contemporary result](https://www.nytimes.com/1951/03/25/archives/knicks-turn-back-celtic-five-9278-new-york-pro-squad-reaches.html)
 - The broadened Chronicling America query timed out on its first Washington game. The earlier per-game searches and
   Basketball-Reference or bulk checks remain in the ledger. Google News Archive supplied readable Pittsburgh issues.
   Brooklyn Newsstand points to its Newspapers.com partner. Exact-page checks on the New York and California archive
@@ -175,6 +197,22 @@ access restrictions establish only that the requested route could not be checked
   searches produced no matching USA TODAY summaries. Two broadcast leads remain unverified for visible starter cards.
   [2005 lineup example](https://sportsdata.usatoday.com/basketball/nba/summary/661118)
   [2006 lineup example](https://sportsdata.usatoday.com/basketball/nba/summary/713521)
+- Later exact USA TODAY checks found both starting fives in twelve 2004 games with partial records and printed crews
+  in ten more 2006 games. A complete USA TODAY crew can supply members to an earlier partial crew when it contains
+  every already selected official. Joe Lindsay and Pat Adams have separately verified identities from Mark Lindsay
+  and Bennie Adams. Barcelona–Philadelphia’s crew is Joe Forte, David Jones and Eddie Viator.
+  [Utah–Philadelphia lineup](https://sportsdata.usatoday.com/basketball/nba/summary/541916)
+  [USA TODAY 2006 crew example](https://sportsdata.usatoday.com/basketball/nba/summary/713511)
+  [NC State’s Joe and Mark Lindsay crew](https://stats.gopack.com/sports/m-baskbl/2004-2005/ncsu1126.html)
+  [Contemporary Pat Adams report](https://www.courant.com/1995/10/19/only-5646-see-celtics-lose-2/)
+  [Barcelona crew](https://20secondtimeout.blogspot.com/2006/10/philadelphia-76ers-open-nba-europe.html)
+- Ten 2026–27 NBA final books supply 30 exact officiating assignments. The source receipt retains the published
+  order, names and uniform numbers. Five officials have verified league identities and persistent warehouse IDs.
+  Andy Nagy retains his existing NBA ID. Current-season uniform numbers stay on the assignments because historical
+  numbers can belong to a different current official. The retrieved game receipts are text extractions of the NBA
+  PDFs. Direct retrieval of the game PDF bytes timed out.
+  [2026–27 league officiating roster](https://cms.nba.com/official/wp-content/uploads/sites/4/2026/10/2026-27-NBA-Officiating-Staff.pdf)
+  [Indiana–Milwaukee final book](https://statsdmz.nba.com/pdfs/20261026/20261026_INDMIL.pdf)
   [Spurs–ASVEL broadcast](https://www.youtube.com/watch?v=QHSwrRIeCFo)
   [Maccabi–Toronto broadcast](https://www.youtube.com/watch?v=iPwq5MuosLs)
 - Hürriyet prints independently dated, score-matched three-person crews for the Efes–Denver and Efes–Golden State
@@ -198,6 +236,8 @@ access restrictions establish only that the requested route could not be checked
   [Sport match report](https://www.sport.es/es/noticias/baloncesto/barca-hizo-historia-costa-sixers-5529093)
   [ASVEL manual box](https://web.archive.org/web/20061103004013id_/http://www.nba.com/games/20061005/SASLYV/manual_boxscore.html)
   [Eurosport match report](https://www.eurosport.fr/basketball/nba/2006-2007/_sto979120/story.shtml)
+  Eurosport’s nine verified ASVEL scorers sum to 90. Their points are available in `audit.club_partial_scorer`.
+  Individual shooting and playing time remain held.
 - USA TODAY’s October 28, 2005 box names Smush Parker as the Lakers player with five points, three assists and
   24:26 of playing time. The Orange County Register confirms the identity and shooting line. The warehouse’s data
   for that performance had been attributed to Adam Parada. [USA TODAY box](https://sportsdata.usatoday.com/basketball/nba/stats/661281)
@@ -214,6 +254,23 @@ access restrictions establish only that the requested route could not be checked
   [Contemporary scoring research](https://sports-reference.com/blog/2019/03/own-goals-added-to-nba-aba-box-scores)
 
 ### Pregame source limits
+
+- Billmill’s continuously dated NBA team roster captures start November 5, 2026. Its recorded batch start precedes
+  the publication of team rows by roughly two minutes in the checked files. As-of roster queries use the source
+  object’s verified publication timestamp or the local receipt time. Historical roster releases add two earlier
+  snapshots with 773 linked player names from 843 printed names. `audit.nba_roster_release_name` includes the
+  unlinked names. These dated opening and restart lists establish roster availability for their effective dates.
+  [Billmill roster publication code](https://github.com/llimllib/nba_data/blob/d3941f7b3105973ef77bf21409eb6bd9c2b65903/pipeline/stats.py#L438-L485)
+  [2018–19 opening rosters](https://ak-static.cms.nba.com/wp-content/uploads/sites/46/2018/10/2018-19-Team-Rosters.pdf)
+  [2020 restart rosters](https://ak-static.cms.nba.com/wp-content/uploads/sites/46/2020/07/Restart-Rosters-7-19-20.pdf)
+
+- The original Pinnacle imports cast their timestamps without a timezone. The producer’s pipeline contains no
+  timezone conversion. The export’s observed team order is away then home. Unique matches by that order include
+  17 main lines and 2,034 detailed rows. The warehouse preserves the other candidates, earlier crosswalk and
+  source-order agreement in `betting.pinnacle_match_review`. The clock remains unknown for those export rows.
+  [Producer timestamp casts](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/projects/test-db/build.py#L552-L625)
+  [Boston at Philadelphia](https://www.nba.com/game/bos-vs-phi-0042500116)
+  [Houston at the Lakers](https://www.nba.com/game/hou-vs-lal-0042500175)
 
 - Billmill serves copies of the original NBA PDFs, including the first 2018 report and samples through the
   2025–26 playoffs. Wayback CDX gives another list of official PDF URLs. The combined 2019–26 index contains

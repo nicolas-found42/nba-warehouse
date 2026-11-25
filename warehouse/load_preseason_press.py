@@ -10,7 +10,8 @@ from urllib.request import Request, urlopen
 
 from build_warehouse import DEFAULT_OUT, connect, warehouse_lock, warehouse_transaction
 from fetch_wayback_nba import cache_bytes
-from promote_domains import OFFICIAL_NAME_CANON
+from load_bref import NEW_OFFICIAL_ID_BASE
+from promote_domains import OFFICIAL_NAME_CANON, create_press_official_identities
 
 CACHE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence' / 'newspapers' / 'hurriyet'
 FIXTURES = {
@@ -24,6 +25,7 @@ MEXICO_SCORE_URL = 'https://deseret.com/2003/10/6/19788454/jazz-90-mavericks-85'
 MEXICO_WITNESS_URL = 'https://eskimo.com/~pbender/mavs/mavs-news/older/03summer/mavs10-6'
 INDIANA_BOX = '0010300012'
 INDIANA_BOX_URL = 'https://deseret.com/2003/10/9/19789070/pacers-96-bulls-82'
+CREW_EVIDENCE = CACHE.parent.parent / 'public-preseason-boxes'
 
 
 def article(raw: bytes) -> dict:
@@ -67,6 +69,52 @@ def load(c) -> None:
         print(f'Newspaper crew verified: {gid}, {len(ids)} officials', flush=True)
     mexico_periods(c)
     indiana_team_box(c)
+    barcelona_crew(c, names)
+
+
+def verified_official(c, names: dict, first: str, last: str, source_url: str) -> int:
+    key = re.sub(r'[^a-z]', '', (first + last).lower())
+    if key in names:
+        return names[key]
+    create_press_official_identities(c)
+    prior = c.execute('SELECT official_id FROM raw.press_official_identity WHERE first_name=? AND last_name=?',
+                      [first, last]).fetchone()
+    if prior:
+        return prior[0]
+    known = c.execute('''SELECT greatest(?,
+        coalesce((SELECT max(official_id) FROM raw.press_official_identity),0),
+        coalesce((SELECT max(official_id) FROM raw.bref_official_map WHERE how='new'),0))''',
+        [NEW_OFFICIAL_ID_BASE]).fetchone()[0]
+    official_id = known + 1
+    c.execute('INSERT INTO raw.press_official_identity VALUES (?,?,?,?)', [official_id, first, last, source_url])
+    return official_id
+
+
+def barcelona_crew(c, names: dict) -> None:
+    reporter = CREW_EVIDENCE / '20secondtimeout-20061005-phibar-crew.tinyfish.json'
+    identity = CREW_EVIDENCE / 'ffbb-eddie-viator-official-bio.tinyfish.json'
+    if not reporter.is_file() or not identity.is_file():
+        return
+    primary, witness = reporter.read_bytes(), identity.read_bytes()
+    digest = hashlib.sha256(primary).hexdigest()
+    if digest != '47e9b3eaf9434554da18d9c3e83d8f8a0b967fe1597cd6cd4636362b3c6074ab' or hashlib.sha256(witness).hexdigest() != (
+            '8e935ed8d37c8aab0cb1ea067dbf5b5b887ea6275d2526d631da7757846e9e01'):
+        raise ValueError('reviewed Barcelona crew evidence has changed')
+    source, identity_source = json.loads(primary)['url'], json.loads(witness)['url']
+    game = '0010600001'
+    fixture = c.execute('''SELECT home_team_id,away_team_id,home_score,away_score FROM core.fact_game
+        WHERE game_id=? AND game_date=DATE '2006-10-05' ''', [game]).fetchone()
+    if fixture != (12304, 1610612755, 104, 99) or (names.get('joeforte'), names.get('davidjones')) != (1161, 1168):
+        raise ValueError('reviewed Barcelona fixture or named NBA referees disagree')
+    with warehouse_transaction(c):
+        viator = verified_official(c, names, 'Eddie', 'Viator', identity_source)
+        crew = ((1161, 'Joe Forte'), (1168, 'David Jones'), (viator, 'Eddie Viator'))
+        c.executemany('INSERT OR IGNORE INTO raw.press_game_official VALUES (?,?,?,?,?,?)',
+                      [(game, pid, name, i, source, digest) for i, (pid, name) in enumerate(crew, 1)])
+        c.execute('''INSERT INTO audit.gap_attempt SELECT 'officials',?,'verified_press_crew',now(),'admitted',?
+            WHERE NOT EXISTS (SELECT 1 FROM audit.gap_attempt WHERE domain='officials' AND game_id=?
+                AND source='verified_press_crew' AND outcome='admitted')''', [game, source, game])
+    print(f'Barcelona crew verified: {game}', flush=True)
 
 
 def mexico_periods(c) -> None:

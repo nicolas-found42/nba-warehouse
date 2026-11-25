@@ -122,6 +122,7 @@ so their prices remain visible in `betting.price_pair` and are withheld from the
 ```sh
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py mirror
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py rosters
+uv run --no-project --with duckdb==2.0.0 python warehouse/load_nba_roster_releases.py
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py backfill --from-date 2018-12-17 --through 2019-06-14
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py indexed-pdfs --from-date 2021-07-01 --through 2026-06-30
 uv run --no-project --with duckdb==2.0.0 python warehouse/betting.py

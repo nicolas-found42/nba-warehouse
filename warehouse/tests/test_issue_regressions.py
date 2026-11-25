@@ -67,7 +67,8 @@ def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():
     publish(c, reports)
     c.execute('''INSERT INTO raw.nba_roster_capture VALUES
         (1,3,'Player One',NULL,NULL,DATE '2026-11-24',TIMESTAMPTZ '2026-11-24 16:00:00-05','fixture','alpha'),
-        (1,4,'Player Two',NULL,NULL,DATE '2026-11-24',TIMESTAMPTZ '2026-11-24 16:00:00-05','fixture','alpha')''')
+        (1,4,'Player Two',NULL,NULL,DATE '2026-11-24',TIMESTAMPTZ '2026-11-24 16:00:00-05','fixture','alpha');
+        INSERT INTO raw.nba_roster_publication VALUES ('fixture','alpha',TIMESTAMPTZ '2026-11-24 16:02:00-05','fixture');''')
     for cutoff, result in (('17:00', [(3, 'Out')]), ('17:59', [(3, 'Out')]), ('18:00', [(4, 'Questionable')]),
                            ('20:00', [(4, 'Questionable')])):
         assert c.execute("SELECT person_id,status FROM core.injury_report_at('0022600001', ?::TIMESTAMPTZ)",
@@ -125,6 +126,24 @@ def test_first_schedule_capture_remains_queryable_when_the_fixture_changes():
                          [f'2026-11-24 {cutoff}:00-05']).fetchall() == expected
 
 
+def test_roster_cutoff_uses_published_time_after_capture_start():
+    c = duckdb.connect()
+    c.execute('''CREATE SCHEMA core; CREATE SCHEMA raw;
+        CREATE TABLE core.dim_person(person_id BIGINT);
+        CREATE TABLE core.dim_team(team_id BIGINT, display_name VARCHAR, abbreviation VARCHAR);
+        INSERT INTO core.dim_team VALUES (1,'Detroit','DET'), (2,'Orlando','ORL');
+        CREATE TABLE core.dim_game(game_id VARCHAR,game_date DATE,home_team_id BIGINT,away_team_id BIGINT,
+            game_datetime_est TIMESTAMP,participant_status VARCHAR);
+        INSERT INTO core.dim_game VALUES ('fixture','2026-11-24',2,1,'2026-11-24 19:00','resolved');''')
+    import pregame_sources
+    pregame_sources.publish(c)
+    c.execute('''INSERT INTO raw.nba_roster_capture VALUES
+        (1,3,'Player One',NULL,NULL,'2026-11-24','2026-11-24 18:30:00-05','roster','digest');
+        INSERT INTO raw.nba_roster_publication VALUES ('roster','digest','2026-11-24 18:32:00-05','fixture');''')
+    assert c.execute("SELECT person_id FROM core.roster_at('fixture',TIMESTAMPTZ '2026-11-24 18:31:00-05')").fetchall() == []
+    assert c.execute("SELECT person_id FROM core.roster_at('fixture',TIMESTAMPTZ '2026-11-24 18:32:00-05')").fetchall() == [(3,)]
+
+
 def test_manual_box_keeps_reported_points_when_shooting_is_inconsistent():
     from load_wayback_manual_box import SCOREBOOKS, export_player, parse_table
 
@@ -173,6 +192,22 @@ def test_espn_foreign_club_match_checks_numeric_id_and_designated_side():
     assert not fixture_matches(competition, san_lorenzo, toronto)
     competition['competitors'][1]['team']['id'] = '24'
     assert not fixture_matches(competition, toronto, san_lorenzo)
+
+
+def test_usatoday_fixture_allows_only_verified_neutral_venue_reversal():
+    from load_usatoday_preseason import fixture_sides
+
+    fixture = ('2006-10-15', 2006, 1610612756, 1610612747, 'PHX', 'LAL', 99, 91, None)
+    event = {
+        'startDate': [{'type': 'Local', 'simplifiedFull': '2006-10-15'}],
+        'season': {'year': 2006}, 'homeTeam': {'id': '13', 'abbreviation': 'LAL'},
+        'awayTeam': {'id': '21', 'abbreviation': 'Pho'}, 'teams': [{'id': '13', 'score': 91}, {'id': '21', 'score': 99}],
+        'venue': {'name': 'Thomas & Mack Center'},
+    }
+    assert fixture_sides(event, fixture) is None
+    assert fixture_sides(event, fixture, neutral_arena='Thomas & Mack Center') == {'13': 1610612747, '21': 1610612756}
+    event['teams'][0]['score'] = 99
+    assert fixture_sides(event, fixture, neutral_arena='Thomas & Mack Center') is None
 
 
 def test_odds_cutoffs_closing_conflicts_and_price_conversion():

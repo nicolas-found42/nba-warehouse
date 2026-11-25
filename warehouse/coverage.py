@@ -71,7 +71,12 @@ UNION ALL SELECT 'starting_lineup', game_id FROM core.fact_starting_lineup GROUP
 UNION ALL SELECT 'officials', game_id FROM core.fact_game_official GROUP BY game_id HAVING count(*) < 3;
 
 CREATE OR REPLACE TEMP TABLE disputed AS
-SELECT 'period_scores' AS domain, game_id FROM audit.period_availability_v26 WHERE status = 'no_valid_candidate';
+SELECT domain,game_id,bool_or(reviewed_conflict) AS reviewed_conflict FROM (
+    SELECT 'period_scores' AS domain,game_id,false AS reviewed_conflict
+    FROM audit.period_availability_v26 WHERE status='no_valid_candidate'
+    UNION ALL SELECT domain,game_id,true FROM audit.gap_attempt
+    WHERE domain='period_scores' AND source='verified_historical_fixture_correction' AND outcome='mismatch'
+) GROUP BY ALL;
 
 CREATE OR REPLACE TABLE audit.game_coverage AS
 SELECT g.game_id, g.season_year, g.season_type, d.domain,
@@ -81,6 +86,7 @@ SELECT g.game_id, g.season_year, g.season_type, d.domain,
     WHEN g.season_start < t.first_season THEN 'not_tracked'
     WHEN p.game_id IS NOT NULL AND d.domain = 'officials' AND coalesce(a.sources_failed, 0) >= 2 THEN 'source_unavailable'
     WHEN p.game_id IS NOT NULL THEN 'partial'
+    WHEN x.reviewed_conflict THEN 'disputed'
     WHEN x.game_id IS NOT NULL AND coalesce(a.sources_failed, 0) < 2 THEN 'disputed'
     WHEN coalesce(a.sources_failed, 0) >= 2 THEN 'source_unavailable'
     ELSE 'missing_recoverable' END AS status,

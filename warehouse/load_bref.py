@@ -219,14 +219,17 @@ def official_map(c: duckdb.DuckDBPyConnection) -> None:
     how = 'alias' (BREF_OFFICIAL_ALIAS), 'name' (promote_domains.OFFICIAL_NAME_CANON: the NBA id used most for that name),
     or 'new' (no NBA referee: synthetic id from NEW_OFFICIAL_ID_BASE, added to core.dim_official by promote_domains.py).
     A referee that already has a synthetic id keeps it while it still has no NBA id."""
-    from promote_domains import OFFICIAL_NAME_CANON
+    from promote_domains import OFFICIAL_NAME_CANON, create_press_official_identities
+    create_press_official_identities(c)
     c.execute('''CREATE TABLE IF NOT EXISTS raw.bref_official_map (bref_referee_id VARCHAR PRIMARY KEY, official_name VARCHAR,
         official_id BIGINT, how VARCHAR)''')
     kept = dict(c.execute("SELECT bref_referee_id, official_id FROM raw.bref_official_map WHERE how = 'new'").fetchall())
     refs = c.execute('SELECT bref_referee_id, any_value(official_name) FROM raw.bref_box_official GROUP BY 1 ORDER BY 1').fetchall()
     canon = dict(c.execute(f'SELECT name, official_id FROM {OFFICIAL_NAME_CANON} WHERE official_id NOT BETWEEN ? AND ?',
                            [NEW_OFFICIAL_ID_BASE, NEW_OFFICIAL_ID_BASE + 999999]).fetchall())
-    nxt = max([NEW_OFFICIAL_ID_BASE, *kept.values()])
+    press_ids = {re.sub('[^a-z]', '', (first + last).lower()): pid for pid, first, last in c.execute(
+        'SELECT official_id,first_name,last_name FROM raw.press_official_identity').fetchall()}
+    nxt = max([NEW_OFFICIAL_ID_BASE, *kept.values(), *press_ids.values()])
     rows = []
     for ref, name in refs:
         key = re.sub('[^a-z]', '', name.lower())
@@ -234,6 +237,8 @@ def official_map(c: duckdb.DuckDBPyConnection) -> None:
             rows.append((ref, name, BREF_OFFICIAL_ALIAS[ref], 'alias'))
         elif key in canon:
             rows.append((ref, name, canon[key], 'name'))
+        elif key in press_ids:
+            rows.append((ref, name, press_ids[key], 'press'))
         else:
             if ref not in kept:
                 nxt += 1

@@ -12,11 +12,19 @@ from urllib.request import Request, urlopen
 from build_warehouse import DEFAULT_OUT, connect, warehouse_lock, warehouse_transaction
 from fetch_wayback_nba import cache_bytes, team_code
 from load_cska_box import normalized
+from load_preseason_press import verified_official
 from promote_domains import OFFICIAL_NAME_CANON
 
 SOURCE = 'usatoday_preseason'
 ROOT = 'https://sportsdata.usatoday.com/basketball/nba/summary/'
 CACHE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence' / 'usatoday-preseason'
+# ESPN recap 261015013 independently identifies the Las Vegas venue and team-keyed result.
+VERIFIED_NEUTRAL_ARENAS = {('0010600043', '713510'): 'Thomas & Mack Center'}
+# Distinct from Mark Lindsay, who appears with Joe in NC State's official 2004 game box.
+PRESS_IDENTITIES = {
+    'joelindsay': ('Joe', 'Lindsay', 'https://stats.gopack.com/sports/m-baskbl/2004-2005/ncsu1126.html'),
+    'patadams': ('Pat', 'Adams', 'https://www.courant.com/1995/10/19/only-5646-see-celtics-lose-2/'),
+}
 
 
 def manifest() -> dict[str, str]:
@@ -37,7 +45,7 @@ def event_info(raw: bytes, event_id: str) -> dict:
     return event
 
 
-def fixture_sides(event: dict, fixture: tuple) -> dict[str, int] | None:
+def fixture_sides(event: dict, fixture: tuple, *, neutral_arena: str | None = None) -> dict[str, int] | None:
     day, season, home, away, hc, ac, hs, aws, arena = fixture
     local_dates = {d['simplifiedFull'] for d in event['startDate'] if d['type'] in ('Local', 'Eastern')}
     if season != event['season']['year'] or day not in local_dates:
@@ -48,7 +56,8 @@ def fixture_sides(event: dict, fixture: tuple) -> dict[str, int] | None:
     actual = [(team_code(t['abbreviation']), scores.get(t['id'])) for t in (src_home, src_away)]
     if len(set(dict(actual))) != 2 or {k: v for k, (_, v) in want.items()} != dict(actual):
         return None
-    if actual[0][0] != team_code(hc) and (not arena or normalized(arena) != normalized(event['venue']['name'])):
+    approved_arenas = {normalized(n) for n in (arena, neutral_arena) if n}
+    if actual[0][0] != team_code(hc) and normalized(event['venue']['name']) not in approved_arenas:
         return None  # accept different home designations only with the same venue and keyed scores
     return {team['id']: want[team_code(team['abbreviation'])][0] for team in (src_home, src_away)}
 
@@ -77,7 +86,7 @@ def create_tables(c) -> None:
 def load(c) -> None:
     create_tables(c)
     official_names = dict(c.execute(f'SELECT name, official_id FROM {OFFICIAL_NAME_CANON}').fetchall())
-    rows, officials, outcomes = [], [], []
+    rows, crew_candidates, outcomes = [], [], []
     for gid, eid in manifest().items():
         path = CACHE / f'{eid}.html'
         if not path.is_file():
@@ -88,7 +97,7 @@ def load(c) -> None:
             JOIN core.dim_team h ON h.team_id = g.home_team_id JOIN core.dim_team a ON a.team_id = g.away_team_id
             WHERE game_id = ? AND season_type = 'Preseason' ''', [gid]).fetchone()
         event = event_info(raw, eid)
-        sides = fixture_sides(event, fixture) if fixture else None
+        sides = fixture_sides(event, fixture, neutral_arena=VERIFIED_NEUTRAL_ARENAS.get((gid, eid))) if fixture else None
         if not sides:
             outcomes.extend((domain, gid, 'mismatch', f'{ROOT}{eid}: date, designated teams, venue or final disagrees')
                             for domain in ('starting_lineup', 'officials'))
@@ -106,7 +115,8 @@ def load(c) -> None:
             matches = []
             for player in lineup:
                 name = normalized(player['firstName'] + ' ' + player['lastName'])
-                key = {'ronartest': 'mettaworldpeace', 'nenehilario': 'nene', 'earlsmith': 'jrsmith'}.get(name, name)
+                key = {'ronartest': 'mettaworldpeace', 'nenehilario': 'nene', 'earlsmith': 'jrsmith',
+                       'clarenceweatherspoon': 'clarweatherspoon'}.get(name, name)
                 candidates = box.get((team, key), []) or box.get((team, name), [])
                 if len(candidates) == 1 and candidates[0][1] == 'played':
                     matches.append((gid, team, candidates[0][0], eid, player['id'], digest))
@@ -116,13 +126,20 @@ def load(c) -> None:
         outcomes.append(('starting_lineup', gid, 'admitted' if len(added) == 10 else 'partial' if added else 'no_data',
                          f'{ROOT}{eid}: {len(added)} identity-checked opening players'))
         ref_names = [r['firstName'] + ' ' + r['lastName'] for r in event['gameDetail']['referees']]
-        chosen = {official_names.get(normalized(n)): n for n in ref_names}
-        if len(chosen) == 3 and None not in chosen and len(ref_names) == 3:
-            officials.extend((gid, oid, n, eid, digest) for oid, n in chosen.items())
-            outcomes.append(('officials', gid, 'admitted', f'{ROOT}{eid}: three identified officials'))
-        else:
-            outcomes.append(('officials', gid, 'no_data', f'{ROOT}{eid}: {len(ref_names)} names, fewer than three independently identified'))
+        crew_candidates.append((gid, eid, digest, ref_names))
     with warehouse_transaction(c):
+        officials = []
+        for gid, eid, digest, ref_names in crew_candidates:
+            for name in ref_names:
+                key = normalized(name)
+                if key not in official_names and key in PRESS_IDENTITIES:
+                    official_names[key] = verified_official(c, official_names, *PRESS_IDENTITIES[key])
+            chosen = {official_names.get(normalized(n)): n for n in ref_names}
+            if len(chosen) == 3 and None not in chosen and len(ref_names) == 3:
+                officials.extend((gid, oid, n, eid, digest) for oid, n in chosen.items())
+                outcomes.append(('officials', gid, 'admitted', f'{ROOT}{eid}: three identified officials'))
+            else:
+                outcomes.append(('officials', gid, 'no_data', f'{ROOT}{eid}: {len(ref_names)} names, fewer than three independently identified'))
         if rows:
             c.executemany('INSERT OR IGNORE INTO raw.usatoday_starter VALUES (?,?,?,?,?,?)', rows)
         if officials:

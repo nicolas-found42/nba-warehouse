@@ -24,7 +24,7 @@ import json
 import sys
 from pathlib import Path
 
-from bref_fetch import BlockedError, NotFound, fetch
+from bref_fetch import BlockedError, NotFound, cache_path, fetch
 from build_warehouse import DEFAULT_OUT, connect, warehouse_lock, warehouse_transaction
 from fetch_bref_periods import Fixture, parse_box
 
@@ -91,6 +91,46 @@ def periods(limit: int | None, warehouse: Path) -> None:
         print(n, gid, outcome, note, flush=True)
 
 
+def replay_cached_periods(c) -> None:
+    c.execute('''CREATE TABLE IF NOT EXISTS audit.period_receipt_bref_chase (game_id VARCHAR PRIMARY KEY, source_url VARCHAR,
+        sha256 VARCHAR, home_periods INTEGER[], away_periods INTEGER[], admitted_at TIMESTAMPTZ)''')
+    queue = c.execute('''SELECT g.game_id,g.game_date,g.home_team_id,g.away_team_id,r.home_score,r.away_score,
+        (SELECT min(source_key) FROM core.team_source_id t WHERE t.team_id=g.home_team_id
+          AND t.source_system='basketball_reference' AND t.league <> 'ABA' AND t.season_end_year=g.season_start+1),
+        (SELECT min(source_key) FROM core.team_source_id t WHERE t.team_id=g.away_team_id
+          AND t.source_system='basketball_reference' AND t.league <> 'ABA' AND t.season_end_year=g.season_start+1)
+        FROM core.dim_game g JOIN core.fact_game_result r USING (game_id)
+        WHERE g.result_status='final' AND g.game_id NOT IN (SELECT game_id FROM core.fact_game_period_score)
+          AND g.game_id IN (SELECT game_id FROM audit.game_coverage WHERE domain='period_scores' AND status <> 'present')''').fetchall()
+    for gid, day, home, away, hs, aws, hc, ac in queue:
+        if not hc or not ac:
+            continue
+        relative = f'/boxscores/{day:%Y%m%d}0{hc}.html'
+        path = cache_path(relative)
+        if not path.is_file():
+            continue
+        original = path.read_bytes()
+        try:
+            result = parse_box(Fixture(gid, day, home, away, hs, aws, relative, hc, ac), original)
+        except ValueError as exc:
+            print(f'Cached line score held for {gid}: {exc}', flush=True)
+            continue
+        if result['status'] != 'matched_fixture_exact_printed_periods':
+            continue
+        url, digest = 'https://www.basketball-reference.com' + relative, hashlib.sha256(original).hexdigest()
+        hp, ap = result['home_periods'], result['away_periods']
+        with warehouse_transaction(c):
+            c.executemany('INSERT INTO core.fact_game_period_score VALUES (?,?,?,?)',
+                          [(gid, team, i, points) for team, line in ((home, hp), (away, ap))
+                           for i, points in enumerate(line, 1)])
+            if len(hp) > 4:
+                c.execute('UPDATE core.fact_game_result SET is_overtime=true WHERE game_id=? AND is_overtime IS NULL', [gid])
+            c.execute('INSERT INTO audit.period_receipt_bref_chase VALUES (?,?,?,?,?,now()) ON CONFLICT DO NOTHING',
+                      [gid, url, digest, hp, ap])
+            c.execute("INSERT INTO audit.gap_attempt VALUES ('period_scores',?,?,now(),'admitted',?)", [gid, SOURCE, url])
+        print(f'Published cached Basketball-Reference periods for {gid}', flush=True)
+
+
 def finalize(warehouse: Path) -> None:
     """After a chasing pass: load newly cached box pages, promote ABA boxes, refresh the coverage ledger."""
     import duckdb
@@ -131,6 +171,7 @@ def finalize(warehouse: Path) -> None:
         publish_own_basket(c)
         from reconcile_historical_games import load as reconcile_historical
         reconcile_historical(c)
+        replay_cached_periods(c)
         from load_usatoday_preseason import load as load_usatoday
         load_usatoday(c)
         load_nba_gaps.pbp_starters(c)
@@ -140,6 +181,10 @@ def finalize(warehouse: Path) -> None:
         import load_espn  # ESPN public API (owner-approved 2026-11-25), lowest rank, fills only games nothing else covers
         if (load_espn.CACHE / 'matches.json').exists():
             load_espn.load(c, json.loads((load_espn.CACHE / 'matches.json').read_text()))
+        from load_nba_roster_releases import load as load_roster_releases
+        load_roster_releases(c)
+        from load_nba_scorer_crews import load as load_scorer_crews
+        load_scorer_crews(c)
         for d in pd.DOMAINS:
             if d.name in ('fact_starting_lineup', 'dim_official', 'fact_game_official'):
                 c.execute('DELETE FROM audit.domain_disposition WHERE domain = ?', [d.name])

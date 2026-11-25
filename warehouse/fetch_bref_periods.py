@@ -129,13 +129,18 @@ def parse_box(f: Fixture, raw: bytes) -> dict[str,object]:
     if labels!=(f.expected_home,f.expected_away):
         return {**out,'status':'designated_side_or_team_disagrees'}
     n = len(home)-2
-    expected = {'team','T',*(str(i) for i in range(1,n+1))}
-    if n not in range(4,11) or set(home)!=expected or set(away)!=expected:
+    numbered = [str(i) for i in range(1,n+1)]
+    labelled_overtime = numbered[:4] + [f'{i}OT' for i in range(1,n-3)]
+    candidates = [numbered, labelled_overtime]
+    if n == 5:
+        candidates.append(numbered[:4] + ['OT'])
+    columns = next((keys for keys in candidates if set(home) == set(away) == {'team', 'T', *keys}), None)
+    if n not in range(4,11) or columns is None:
         return {**out,'status':'invalid_line_score_shape'}
     for row in (home,away):
-        if any(re.fullmatch('[0-9]{1,3}',row[k]) is None for k in expected-{'team'}):
+        if any(re.fullmatch('[0-9]{1,3}',row[k]) is None for k in [*columns, 'T']):
             return {**out,'status':'invalid_line_score_cell'}
-    h,a = ([int(row[str(i)]) for i in range(1,n+1)] for row in (home,away))
+    h,a = ([int(row[k]) for k in columns] for row in (home,away))
     totals = int(home['T']),int(away['T'])
     out.update(home_periods=h,away_periods=a,source_home_final=totals[0],source_away_final=totals[1])
     if totals!=(f.home_final,f.away_final):

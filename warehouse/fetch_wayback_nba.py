@@ -24,7 +24,7 @@ CACHE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evi
 DOMAINS = ('play_by_play', 'shot_chart', 'starting_lineup', 'officials', 'period_scores', 'player_box', 'team_box')
 PAGES = ('boxscore.html', 'manual_boxscore.html', 'playbyplay.html', 'gameinfo.html')
 PAUSE = 1.0
-ALIAS = {'NJN': 'BKN', 'NOH': 'NOP', 'NOK': 'NOP', 'SEA': 'OKC', 'VAN': 'MEM', 'SAN': 'SAS',
+ALIAS = {'NJ': 'BKN', 'NJN': 'BKN', 'NOH': 'NOP', 'NOK': 'NOP', 'SEA': 'OKC', 'VAN': 'MEM', 'SAN': 'SAS',
          'CHH': 'CHA', 'GS': 'GSW', 'NY': 'NYK', 'NO': 'NOP', 'SA': 'SAS', 'PHO': 'PHX', 'UTH': 'UTA',
          'TEL': 'MTA', 'MCB': 'MTA', 'TUR': 'EPT', 'EFP': 'EPT', 'BCK': 'KHI', 'LMR': 'ROM'}
 

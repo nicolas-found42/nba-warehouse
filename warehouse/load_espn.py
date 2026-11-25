@@ -27,6 +27,9 @@ from build_warehouse import DEFAULT_OUT, connect, warehouse_lock, warehouse_tran
 from fetch_espn import CACHE, DOMAINS, validate_summary
 
 SOURCE = 'espn_api'
+PERIOD_SOURCE_HOLDS = {
+    '0010400108': 'USA TODAY and ESPN disagree on the 3rd and 4th quarters despite agreeing on the corrected final',
+}
 
 
 def norm(name: str) -> str:
@@ -298,6 +301,9 @@ def load_matched(c, matches: dict) -> None:
     for (gid,) in c.execute("SELECT game_id FROM audit.game_coverage WHERE domain = 'period_scores' AND status <> 'present'").fetchall():
         f = CACHE / 'summary' / f'{matches.get(gid)}.json'
         if gid in have_per or gid not in matches or not f.exists() or gid not in games:
+            continue
+        if gid in PERIOD_SOURCE_HOLDS:
+            att.append(('period_scores', gid, 'mismatch', PERIOD_SOURCE_HOLDS[gid]))
             continue
         comp = ((json.loads(f.read_text()).get('header') or {}).get('competitions') or [{}])[0]
         lines = {}

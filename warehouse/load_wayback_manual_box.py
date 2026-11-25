@@ -14,6 +14,12 @@ SOURCE = 'nba_com_archive_manual_box'
 DAY = '20061005'
 BARCELONA_REPORT = 'https://www.sport.es/es/noticias/baloncesto/barca-hizo-historia-costa-sixers-5529093'
 CONFIRMED_POINTS_WITH_CONFLICT = {'aiguodala': 13, 'mkasun': 4}
+ASVEL_REPORT = 'https://www.eurosport.fr/basketball/nba/2006-2007/_sto979120/story.shtml'
+ASVEL_SCORERS = {
+    'sy': (509, 'Amara Sy'), 'greene': (505, 'Brian Greene'), 'foirest': (504, 'Laurent Foirest'),
+    'troutman': (510, 'Chevon Troutman'), 'eito': (587, 'Antoine Eito'), 'masingue': (507, 'Vincent Masingue'),
+    'diakite': (502, 'Nouha Diakité'), 'barrett': (500, 'Rowan Barrett'), 'cakarevic': (501, 'Marko Čakarević'),
+}
 
 
 @dataclass(frozen=True)
@@ -218,6 +224,32 @@ def load(c) -> None:
         path = CACHE / 'snap' / DAY / fixture.folder / f'{fixture.capture}_manual_boxscore.html'
         if path.is_file():
             load_scorebook(c, fixture, path.read_bytes())
+    asvel_scorer_receipt(c)
+
+
+def asvel_scorer_receipt(c) -> None:
+    path = CACHE.parent / 'public-preseason-boxes' / 'eurosport-20061005-saslyv.html'
+    if not path.is_file():
+        return
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != 'b039760f0d958e0695ce950ed125e864503b0314f0fdd3231a0bc02c01a480e6':
+        raise ValueError('reviewed ASVEL source digest has changed')
+    section = raw.decode().split('FICHE TECHNIQUE</div>', 1)[1].split('San Antonio Spurs</b>', 1)[0]
+    mark = re.search(r'>Marqueurs</i>:\s*(.*?)</div>', section, re.S)
+    scores = {normalized(key): int(points) for key, points in re.findall(r'([^,]+?)\s*\((\d+)\)', text(mark[1]))}
+    fixture = c.execute("SELECT home_team_id,home_score,away_score FROM core.fact_game WHERE game_id='0010600002'").fetchone()
+    if fixture != (12305, 90, 115) or set(scores) != set(ASVEL_SCORERS) or sum(scores.values()) != 90:
+        raise ValueError('published ASVEL scorers do not reconcile to the named fixture')
+    with warehouse_transaction(c):
+        c.execute('''CREATE TABLE IF NOT EXISTS audit.club_partial_scorer (
+            game_id VARCHAR, team_id BIGINT, person_id BIGINT, reported_name VARCHAR, points INTEGER, source_url VARCHAR,
+            sha256 VARCHAR, PRIMARY KEY (game_id,team_id,person_id,sha256))''')
+        c.executemany('INSERT OR IGNORE INTO audit.club_partial_scorer VALUES (?,?,?,?,?,?,?)',
+                      [('0010600002', 12305, pid, name, scores[key], ASVEL_REPORT, digest) for key, (pid, name) in ASVEL_SCORERS.items()])
+        c.execute('''INSERT INTO audit.gap_attempt SELECT 'player_box','0010600002','eurosport_match_report',now(),'no_data',?
+            WHERE NOT EXISTS (SELECT 1 FROM audit.gap_attempt WHERE game_id='0010600002' AND domain='player_box'
+                AND source='eurosport_match_report')''', [ASVEL_REPORT + ' publishes nine scorers and 90 points, without individual shooting or minutes'])
 
 
 if __name__ == '__main__':

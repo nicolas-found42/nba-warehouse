@@ -41,6 +41,12 @@ def norm_name(expr: str) -> str:
     return f"regexp_replace(lower({expr}), '[^a-z]', '', 'g')"
 
 
+def create_press_official_identities(c) -> None:
+    c.execute('''CREATE TABLE IF NOT EXISTS raw.press_official_identity (
+        official_id BIGINT PRIMARY KEY, first_name VARCHAR, last_name VARCHAR,
+        source_url VARCHAR, UNIQUE (first_name, last_name))''')
+
+
 @dataclass
 class Domain:
     name: str                 # core table name
@@ -160,7 +166,7 @@ DOMAINS: list[Domain] = [
                 'season_year': 'core.dim_season(season_year)'},
            not_null=['person_id', 'team_id', 'season_year']),
     Domain('fact_starting_lineup', 'raw.fact_starting_lineup_player (1996-) + box-score starting positions where no lineup row exists + Kaggle eoinamoore starters for games neither has',
-           '''WITH hi AS (SELECT game_id, team_id, person_id, starting_position, 'nba_starting_lineup' AS source FROM raw.fact_starting_lineup_player
+           '''WITH high_source AS (SELECT game_id, team_id, person_id, starting_position, 'nba_starting_lineup' AS source FROM raw.fact_starting_lineup_player
               UNION ALL
               SELECT game_id, team_id, person_id, starting_position, 'box_score_starting_position' FROM core.fact_player_game_stats
               WHERE nullif(trim(starting_position), '') IS NOT NULL
@@ -184,7 +190,13 @@ DOMAINS: list[Domain] = [
                 AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.llimllib_starter)),
               press_starters AS (
                 SELECT DISTINCT game_id,team_id,person_id FROM raw.usatoday_starter
-                QUALIFY count(DISTINCT person_id) OVER (PARTITION BY game_id,team_id) = 5)
+                QUALIFY count(DISTINCT person_id) OVER (PARTITION BY game_id,team_id) = 5),
+              invalid_high_source AS (
+                SELECT game_id, team_id FROM high_source GROUP BY 1,2
+                HAVING count(DISTINCT person_id) <> 5 OR count(DISTINCT source) > 1),
+              hi AS (
+                SELECT * FROM high_source WHERE (game_id,team_id) NOT IN (
+                  SELECT p.game_id,p.team_id FROM press_starters p JOIN invalid_high_source b USING (game_id,team_id)))
               SELECT * FROM hi
               UNION ALL  -- archived NBA.com box pages (load_wayback_nba.py): only teams no source above names starters for
               SELECT game_id, team_id, person_id, NULL, 'nba_com_archive' FROM raw.wayback_starter
@@ -242,7 +254,8 @@ DOMAINS: list[Domain] = [
                     WHERE nullif(trim(code), '') IS NOT NULL
                     UNION ALL  -- referees on Basketball-Reference box pages with no NBA referee id (synthetic ids, load_bref.official_map)
                     SELECT official_id, split_part(official_name, ' ', 1), trim(substr(official_name, length(split_part(official_name, ' ', 1)) + 2)), NULL, 4
-                    FROM raw.bref_official_map WHERE how = 'new')
+                    FROM raw.bref_official_map WHERE how = 'new'
+                    UNION ALL SELECT official_id, first_name, last_name, NULL, 4 FROM raw.press_official_identity)
               GROUP BY 1 HAVING bool_or(pref = 1) OR true''',
            key=['official_id'], not_null=['official_id']),
     Domain('fact_game_official', 'raw.officials (NBA box-score officials, 1996-2023); ESPN-resolved officials, then Kaggle eoinamoore names, only for games NBA data lacks',
@@ -305,7 +318,9 @@ arc AS (
               SELECT DISTINCT game_id, official_id, nullif(jersey_num, '') AS jersey_num, 'nba_com_archive' AS source
               FROM raw.wayback_game_official WHERE official_id IS NOT NULL
               UNION ALL
-              SELECT DISTINCT game_id, official_id, NULL, 'newspaper_hurriyet' FROM raw.press_game_official
+              SELECT DISTINCT game_id, official_id, NULL,
+                  CASE WHEN contains(source_url, 'hurriyet.com.tr/') THEN 'newspaper_hurriyet' ELSE 'verified_press_crew' END
+              FROM raw.press_game_official
               WHERE game_id NOT IN (SELECT game_id FROM raw.wayback_game_official WHERE official_id IS NOT NULL)
               UNION ALL
               SELECT DISTINCT game_id, official_id, NULL, 'usatoday_preseason' FROM raw.usatoday_official
@@ -340,9 +355,27 @@ ranked AS (
               WHERE bb.game_id NOT IN (SELECT game_id FROM espn_only)
                 AND (bb.game_id IN (SELECT game_id FROM base GROUP BY 1 HAVING count(DISTINCT official_id) < 3)
                      OR (bb.game_id NOT IN (SELECT game_id FROM base) AND bb.game_id IN (SELECT game_id FROM bb_full)))
-                AND (bb.game_id, bb.official_id) NOT IN (SELECT game_id, official_id FROM base))
+                AND (bb.game_id, bb.official_id) NOT IN (SELECT game_id, official_id FROM base)),
+selected AS (
               SELECT * FROM ranked WHERE game_id NOT IN (SELECT game_id FROM arc_selected)
-              UNION ALL SELECT * FROM arc_selected''',
+              UNION ALL SELECT * FROM arc_selected),
+usatoday_crews AS (
+              SELECT game_id, list(DISTINCT official_id ORDER BY official_id) AS officials
+              FROM raw.usatoday_official GROUP BY game_id HAVING count(DISTINCT official_id) = 3),
+confirmed_partial AS (
+              SELECT s.game_id FROM selected s JOIN usatoday_crews u USING (game_id)
+              GROUP BY s.game_id HAVING count(DISTINCT s.official_id) < 3
+                AND bool_and(list_contains(u.officials, s.official_id))),
+supplemented AS (
+              SELECT * FROM selected UNION ALL
+              SELECT p.game_id, u.official_id, NULL, 'usatoday_preseason'
+              FROM confirmed_partial p JOIN (SELECT DISTINCT game_id, official_id FROM raw.usatoday_official) u USING (game_id)
+              WHERE (p.game_id, u.official_id) NOT IN (SELECT game_id, official_id FROM selected)),
+official_report AS (
+              SELECT DISTINCT game_id,official_id,jersey_num,'nba_official_scorer_report' AS source FROM raw.nba_scorer_crew
+              QUALIFY count(DISTINCT official_id) OVER (PARTITION BY game_id) = 3)
+              SELECT * FROM official_report UNION ALL
+              SELECT * FROM supplemented WHERE game_id NOT IN (SELECT game_id FROM official_report)''',
            key=['game_id', 'official_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'official_id': 'core.dim_official(official_id)'},
            not_null=['game_id', 'official_id']),
@@ -421,6 +454,7 @@ def main() -> None:
     ap.add_argument('--only', nargs='*')
     a = ap.parse_args()
     c = connect(a.output)
+    create_press_official_identities(c)
     c.execute('''CREATE TABLE IF NOT EXISTS raw.captured_club_starter (
         game_id VARCHAR, team_id BIGINT, person_id BIGINT, source VARCHAR, source_url VARCHAR,
         PRIMARY KEY (game_id, team_id, person_id, source))''')
@@ -429,6 +463,8 @@ def main() -> None:
         PRIMARY KEY (game_id, official_id, sha256))''')
     from load_usatoday_preseason import create_tables as create_usatoday_tables
     create_usatoday_tables(c)
+    from load_nba_scorer_crews import create_table as create_scorer_crew_table
+    create_scorer_crew_table(c)
     c.execute('''CREATE TABLE IF NOT EXISTS audit.domain_disposition (domain VARCHAR PRIMARY KEY, source VARCHAR,
         source_rows BIGINT, published BIGINT, duplicate BIGINT, held BIGINT)''')
     c.execute('CREATE TABLE IF NOT EXISTS audit.domain_held (domain VARCHAR, source_row BIGINT, reason VARCHAR, row_json JSON)')

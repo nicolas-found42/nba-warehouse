@@ -182,6 +182,16 @@ def test_chase_rejects_overtime_without_a_tie() -> None:
     assert res['status'] == 'untied_before_overtime'
 
 
+def test_chase_reads_named_overtime_cells_in_contiguous_order() -> None:
+    f = fixture(94, 91)
+    raw = box_html(f.source_path, f.day, ('BOS', [20, 20, 20, 20, 7, 7]), ('NYK', [20, 20, 20, 20, 7, 4]))
+    raw = raw.replace(b'data-stat="5"', b'data-stat="1OT"').replace(b'data-stat="6"', b'data-stat="2OT"')
+    res = parse_box(f, raw)
+    assert res['status'] == 'matched_fixture_exact_printed_periods'
+    assert res['home_periods'] == [20, 20, 20, 20, 7, 7]
+    assert parse_box(f, raw.replace(b'data-stat="2OT"', b'data-stat="3OT"'))['status'] == 'invalid_line_score_shape'
+
+
 def test_chase_rejects_other_fixture_on_same_page() -> None:
     f = fixture(80, 70)
     res = parse_box(f, box_html(f.source_path, f.day, ('PHW', [20, 20, 20, 20]), ('NYK', [15, 20, 15, 20])))

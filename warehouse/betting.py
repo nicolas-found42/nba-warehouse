@@ -7,9 +7,9 @@ Sources (all from the raw layer, unchanged there):
   raw.fact_game_market_odds     Pinnacle market odds keyed by "Team A vs Team B" + snapshot time
 
 Matching for the time-keyed sources is redone here independently: the game must involve exactly
-those two franchises and agree on preseason status. A unique candidate is 'matched'; several are
-'ambiguous'; none is 'unmatched'. The source pipeline's own crosswalk is
-kept next to ours (source_game_id / source_match_method) and disagreements are flagged.
+those two franchises and agree on preseason status. For multiple candidates, a unique away-home order
+resolves the fixture under the ordering observed in the Pinnacle exports. Otherwise the row stays ambiguous.
+The source pipeline's crosswalk and full candidate list remain available for review.
 
   uv run --no-project --with duckdb==2.0.0 python warehouse/betting.py [--output data/nba-warehouse.duckdb]
 """
@@ -70,7 +70,8 @@ SELECT k.*,
 FROM keyed k;
 
 CREATE OR REPLACE TEMP TABLE cand AS
-SELECT k.source, k.source_key, k.snapshot_ts, k.n1, k.n2, k.is_preseason, s.game_id, s.tip_est
+SELECT k.source, k.source_key, k.snapshot_ts, k.n1, k.n2, k.is_preseason, s.game_id, s.tip_est,
+       k.team1_id = s.away_team_id AND k.team2_id = s.home_team_id AS away_home_order_agrees
 FROM keyed_team k JOIN game_slot s
   ON s.t_lo = least(k.team1_id, k.team2_id) AND s.t_hi = greatest(k.team1_id, k.team2_id)
  AND (k.is_preseason IS NULL OR k.is_preseason = (s.season_type = 'Preseason'))
@@ -80,9 +81,12 @@ CREATE OR REPLACE TEMP TABLE our_match AS
 SELECT k.source, k.source_key, k.snapshot_ts, k.n1, k.n2, k.is_preseason, k.team1_id, k.team2_id,
        CASE WHEN k.team1_id IS NULL OR k.team2_id IS NULL THEN 'team_name_unresolved'
             WHEN count(c.game_id) = 0 THEN 'unmatched'
-            WHEN count(c.game_id) = 1 THEN 'matched' ELSE 'ambiguous' END AS match_status,
-       CASE WHEN count(c.game_id) = 1 THEN any_value(c.game_id) END AS game_id,
-       list(c.game_id ORDER BY c.tip_est) FILTER (WHERE c.game_id IS NOT NULL) AS candidate_game_ids
+            WHEN count(c.game_id) = 1 OR count_if(c.away_home_order_agrees) = 1 THEN 'matched' ELSE 'ambiguous' END AS match_status,
+       CASE WHEN count(c.game_id) = 1 THEN any_value(c.game_id)
+            WHEN count_if(c.away_home_order_agrees) = 1 THEN max(c.game_id) FILTER (WHERE c.away_home_order_agrees) END AS game_id,
+       list(c.game_id ORDER BY c.tip_est, c.game_id) FILTER (WHERE c.game_id IS NOT NULL) AS candidate_game_ids,
+       CASE WHEN count(c.game_id) = 1 THEN 'sole_time_window_candidate'
+            WHEN count_if(c.away_home_order_agrees) = 1 THEN 'sole_away_home_candidate' END AS fixture_link_method
 FROM keyed_team k LEFT JOIN cand c ON c.source = k.source AND c.source_key IS NOT DISTINCT FROM k.source_key
     AND c.snapshot_ts IS NOT DISTINCT FROM k.snapshot_ts AND c.n1 IS NOT DISTINCT FROM k.n1
     AND c.n2 IS NOT DISTINCT FROM k.n2 AND c.is_preseason IS NOT DISTINCT FROM k.is_preseason
@@ -91,7 +95,8 @@ GROUP BY k.source, k.source_key, k.snapshot_ts, k.n1, k.n2, k.is_preseason, k.te
 CREATE OR REPLACE TABLE betting.main_line AS
 SELECT m.*, o.team1_id AS matched_team1_id, o.team2_id AS matched_team2_id, o.match_status, o.game_id, o.candidate_game_ids,
        b.game_id AS source_game_id, b.match_method AS source_match_method,
-       (b.game_id IS NOT NULL AND o.game_id IS NOT NULL AND b.game_id <> o.game_id) AS disagrees_with_source
+       (b.game_id IS NOT NULL AND o.game_id IS NOT NULL AND b.game_id <> o.game_id) AS disagrees_with_source,
+       o.fixture_link_method
 FROM raw.fact_game_main_line m JOIN our_match o ON o.source = 'main_line' AND o.source_key IS NOT DISTINCT FROM m.game_link
      AND o.snapshot_ts IS NOT DISTINCT FROM m.snapshot_ts AND o.n1 IS NOT DISTINCT FROM lower(trim(m.team1_name))
      AND o.n2 IS NOT DISTINCT FROM lower(trim(m.team2_name)) AND o.is_preseason IS NOT DISTINCT FROM m.is_preseason
@@ -102,7 +107,8 @@ LEFT JOIN (SELECT game_link, CASE WHEN count(DISTINCT game_id) = 1 THEN any_valu
 CREATE OR REPLACE TABLE betting.market_odds AS
 SELECT m.*, o.team1_id, o.team2_id, o.match_status, o.game_id, o.candidate_game_ids,
        b.game_id AS source_game_id, b.match_method AS source_match_method,
-       (b.game_id IS NOT NULL AND o.game_id IS NOT NULL AND b.game_id <> o.game_id) AS disagrees_with_source
+       (b.game_id IS NOT NULL AND o.game_id IS NOT NULL AND b.game_id <> o.game_id) AS disagrees_with_source,
+       o.fixture_link_method
 FROM raw.fact_game_market_odds m JOIN our_match o ON o.source = 'market_odds' AND o.source_key IS NOT DISTINCT FROM m.matchup
      AND o.snapshot_ts IS NOT DISTINCT FROM m.snapshot_ts AND o.is_preseason IS NOT DISTINCT FROM m.is_preseason
 LEFT JOIN (SELECT matchup, snapshot_ts, CASE WHEN count(DISTINCT game_id) = 1 THEN any_value(game_id) END AS game_id,
@@ -119,13 +125,21 @@ UNION ALL SELECT 'main_line disagrees_with_source', 'flag', count(*), count(DIST
 UNION ALL SELECT 'market_odds disagrees_with_source', 'flag', count(*), count(DISTINCT game_id) FROM betting.market_odds WHERE disagrees_with_source;
 
 CREATE OR REPLACE VIEW betting.pinnacle_match_review AS
+WITH review AS (
 SELECT DISTINCT 'main_line' AS source, game_link AS fixture_key, snapshot_ts, match_status,
-       game_id, candidate_game_ids, source_game_id, source_match_method, disagrees_with_source
-FROM betting.main_line WHERE match_status <> 'matched' OR disagrees_with_source
+       game_id, candidate_game_ids, source_game_id, source_match_method, disagrees_with_source, fixture_link_method,
+       matched_team1_id AS team1_id, matched_team2_id AS team2_id
+FROM betting.main_line WHERE match_status <> 'matched' OR disagrees_with_source OR fixture_link_method = 'sole_away_home_candidate'
 UNION ALL
 SELECT DISTINCT 'market_odds', matchup, snapshot_ts, match_status, game_id, candidate_game_ids,
-       source_game_id, source_match_method, disagrees_with_source
-FROM betting.market_odds WHERE match_status <> 'matched' OR disagrees_with_source;
+       source_game_id, source_match_method, disagrees_with_source, fixture_link_method, team1_id, team2_id
+FROM betting.market_odds WHERE match_status <> 'matched' OR disagrees_with_source OR fixture_link_method = 'sole_away_home_candidate')
+SELECT review.* EXCLUDE (team1_id, team2_id),
+       CASE WHEN g.game_id IS NULL OR team1_id IS NULL OR team2_id IS NULL THEN 'unavailable'
+            WHEN team1_id = g.away_team_id AND team2_id = g.home_team_id THEN 'agrees'
+            WHEN team2_id = g.away_team_id AND team1_id = g.home_team_id THEN 'reversed'
+            ELSE 'different_teams' END AS source_side_status
+FROM review LEFT JOIN core.dim_game g ON g.game_id = review.source_game_id;
 """
 
 
