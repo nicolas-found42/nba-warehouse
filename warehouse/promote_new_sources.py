@@ -382,6 +382,84 @@ def load_kaggle_aba_box(c) -> bool:
     return True
 
 
+BULK_COL = {  # warehouse field -> (raw.boxtop_aba_stat column, raw.nbastats_aba_gamelog column)
+    'fg': ('fgm', 'fgm'), 'fga': ('fga', 'fga'), 'fg3': ('fg3m', 'fg3m'), 'fg3a': ('fg3a', 'fg3a'), 'ft': ('ftm', 'ftm'),
+    'fta': ('fta', 'fta'), 'orb': ('oreb', 'oreb'), 'drb': (None, 'dreb'), 'trb': ('reb', 'reb'), 'ast': ('ast', 'ast'),
+    'stl': ('stl', 'stl'), 'blk': ('blk', 'blk'), 'tov': ('tov', 'tov'), 'pf': ('pf', 'pf'), 'pts': ('pts', 'pts')}
+
+
+def aba_bulk_fill(c) -> None:
+    """Fill blank fields of ABA player box lines (abox_src) from the two bulk files, below Basketball-Reference in rank.
+
+    Boxtop rows match on date + Basketball-Reference player id; nbastats rows on date + last name + points (first
+    initial breaks ties), one-to-one only. A blank field takes the Boxtop/nbastats value; when both have a value and
+    they differ (same rank), the field stays blank and the pair goes to audit.aba_box_field_conflict. Values that
+    disagree with a Basketball-Reference value are logged there too and not used. Team totals of games without a
+    box page are re-summed from the filled player rows.
+    """
+    have = {r[0] for r in c.execute("""SELECT table_name FROM duckdb_tables() WHERE schema_name = 'raw'
+        AND table_name IN ('boxtop_aba_stat', 'nbastats_aba_gamelog')""").fetchall()}
+    if len(have) < 2:
+        return
+    norm = "lower(regexp_replace(strip_accents({x}), '[^A-Za-z ]', '', 'g'))"
+    c.execute('''CREATE OR REPLACE TEMP TABLE ab_rows AS
+        SELECT r.*, strptime(substr(r.bref_game_key, 1, 8), '%Y%m%d')::DATE AS game_date, coalesce(k."Player Name", r.label) AS player_name
+        FROM abox_src r LEFT JOIN (SELECT DISTINCT "Game Reference", "Player Reference", "Player Name" FROM raw_kaggle.gonzalo_aba_box) k
+          ON k."Game Reference" = r.bref_game_key AND k."Player Reference" = r.bref_player_id
+        WHERE r.label <> 'Team Totals' AND r.bref_player_id IS NOT NULL''')
+    c.execute('''CREATE OR REPLACE TEMP TABLE bt_match AS
+        SELECT a.bref_game_key, a.bref_player_id, any_value(b) AS b FROM ab_rows a
+        JOIN raw.boxtop_aba_stat b ON b.game_date = a.game_date AND b.bref_player_id = a.bref_player_id
+        GROUP BY 1, 2 HAVING count(*) = 1''')
+    c.execute(f'''CREATE OR REPLACE TEMP TABLE ns_cand AS
+        WITH n AS (SELECT *, row_number() OVER () AS rid FROM raw.nbastats_aba_gamelog)
+        SELECT n.rid, a.bref_game_key, a.bref_player_id, n AS ns,
+               {norm.format(x='a.player_name')} LIKE {norm.format(x='n.first_name')}[1] || '%' AS initial_ok
+        FROM n JOIN ab_rows a ON a.game_date = n.game_date AND a.pts IS NOT DISTINCT FROM n.pts
+         AND {norm.format(x='a.player_name')} LIKE '%' || {norm.format(x='n.last_name')}''')
+    c.execute('''CREATE OR REPLACE TEMP TABLE ns_match AS
+        WITH one AS (SELECT * FROM ns_cand QUALIFY count(*) OVER (PARTITION BY rid) = 1
+                     UNION ALL
+                     SELECT * FROM ns_cand WHERE initial_ok QUALIFY count(*) OVER (PARTITION BY rid) > 1
+                       AND count(*) FILTER (WHERE initial_ok) OVER (PARTITION BY rid) = 1)
+        SELECT bref_game_key, bref_player_id, any_value(ns) AS ns FROM one GROUP BY 1, 2 HAVING count(*) = 1''')
+    fill, conflict = [], []
+    for f, (bc, nc) in BULK_COL.items():
+        b = f"try_cast(m1.b.{bc} AS INTEGER)" if bc else 'NULL::INTEGER'
+        n = f"m2.ns.{nc}"
+        fill.append(f'''coalesce(r.{f}, CASE WHEN {b} IS NOT NULL AND {n} IS NOT NULL AND {b} <> {n} THEN NULL
+                                             ELSE coalesce({b}, {n}) END) AS {f}''')
+        conflict.append(f'''SELECT r.bref_game_key, r.bref_player_id, '{f}' AS field, r.box_source, r.{f} AS bref_value,
+                                   {b} AS boxtop_value, {n} AS nbastats_value
+                            FROM abox_src r LEFT JOIN bt_match m1 USING (bref_game_key, bref_player_id)
+                            LEFT JOIN ns_match m2 USING (bref_game_key, bref_player_id)
+                            WHERE r.label <> 'Team Totals' AND (
+                                  ({b} IS NOT NULL AND {n} IS NOT NULL AND {b} <> {n})
+                               OR (r.{f} IS NOT NULL AND {b} IS NOT NULL AND {b} <> r.{f})
+                               OR (r.{f} IS NOT NULL AND {n} IS NOT NULL AND {n} <> r.{f}))''')
+    c.execute('CREATE OR REPLACE TABLE audit.aba_box_field_conflict AS ' + ' UNION ALL '.join(conflict))
+    keep = 'box_source, bref_game_key, team_abbr, row_index, bref_player_id, label, minutes_text, dnp_reason'
+    before = ', '.join(f'count(r.{f}) AS {f}' for f in BOX_STATS)
+    c.execute(f'''CREATE OR REPLACE TEMP TABLE abox_filled AS
+        SELECT r.box_source, r.bref_game_key, r.team_abbr, r.row_index, r.bref_player_id, r.label, r.minutes_text, r.dnp_reason,
+               {', '.join(fill)}
+        FROM abox_src r LEFT JOIN bt_match m1 USING (bref_game_key, bref_player_id) LEFT JOIN ns_match m2 USING (bref_game_key, bref_player_id)
+        WHERE r.label <> 'Team Totals' ''')
+    tot = ', '.join(f'sum({f})::INTEGER' for f in BOX_STATS)
+    c.execute(f'''CREATE OR REPLACE TEMP TABLE abox_src2 AS
+        SELECT {keep}, {', '.join(BOX_STATS)} FROM abox_filled
+        UNION ALL SELECT {keep}, {', '.join(BOX_STATS)} FROM abox_src WHERE label = 'Team Totals' AND box_source <> 'player_sum'
+        UNION ALL SELECT 'player_sum', bref_game_key, team_abbr, 9999, NULL, 'Team Totals', NULL, NULL, {tot}
+            FROM abox_filled WHERE bref_game_key NOT IN (SELECT bref_game_key FROM abox_src WHERE label = 'Team Totals' AND box_source <> 'player_sum')
+            GROUP BY bref_game_key, team_abbr''')
+    b0 = c.execute(f"SELECT {before} FROM abox_src r WHERE label <> 'Team Totals'").fetchall()[0]
+    b1 = c.execute(f"SELECT {before} FROM abox_filled r").fetchall()[0]
+    print('bulk matches: boxtop', c.execute('SELECT count(*) FROM bt_match').fetchone()[0], 'nbastats', c.execute('SELECT count(*) FROM ns_match').fetchone()[0])
+    print('filled fields:', {f: (x, y) for f, x, y in zip(BOX_STATS, b0, b1) if y != x})
+    print('field conflicts:', c.execute('SELECT field, count(*) FROM audit.aba_box_field_conflict GROUP BY 1 ORDER BY 2 DESC').fetchall())
+    c.execute('CREATE OR REPLACE TEMP TABLE abox_src AS SELECT * FROM abox_src2')
+
+
 def aba_boxes(c) -> None:
     """ABA team and player box scores.
 
@@ -425,6 +503,7 @@ def aba_boxes(c) -> None:
             UNION ALL SELECT 'player_sum', bref_game_key, team_abbr, 9999, NULL, 'Team Totals', NULL, NULL, {tot}
             FROM nonpage GROUP BY bref_game_key, team_abbr'''
     c.execute(f'CREATE OR REPLACE TEMP TABLE abox_src AS {" UNION ALL ".join(parts)}')
+    aba_bulk_fill(c)
     c.execute(f'''CREATE OR REPLACE TEMP TABLE abox AS
         SELECT k.game_id, g.season_start + 1 AS season_end_year, r.box_source, r.team_abbr, r.bref_player_id, r.label,
                {BREF_TEAM.format(k='r.team_abbr', y='g.season_start + 1')} AS team_id,
