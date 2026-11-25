@@ -221,6 +221,31 @@ def build() -> None:
         'next': 'Then the downloaded pages replace the Kaggle rows for those games.',
         'recent': [],
     })
+    # NBA.com downloads for remaining modern gaps
+    for kind, folder, label, plain in (
+        ('lineups', 'boxscoretraditionalv3', 'Downloading missing starting lineups from NBA.com',
+         'About 3,950 games (mostly 2000–01, 2021–22 and preseason) had no starting lineup. NBA.com has them in its box scores; '
+         'this downloads one game per second and loads the starters.'),
+        ('pbp', 'playbyplayv3', 'Downloading missing play-by-play from NBA.com',
+         'About 975 games (mostly preseason) had no play-by-play or shot chart. NBA.com has some of them; '
+         'games it returns empty for are recorded as one failed source.')):
+        logf = DATA / 'crawl-logs' / f'nba-gaps-{kind}.log'
+        if not logf.exists():
+            continue
+        m = re.findall(r'^(\d+) \w+ games to fetch$', logf.read_text(errors='replace'), re.M)
+        total = int(m[0]) if m else 0
+        done = sum(1 for _ in (EVIDENCE / 'nba-gaps' / folder).glob('*.json'))
+        run = subprocess.run(['pgrep', '-f', f'fetch_nba_gaps.py {kind}'], capture_output=True).returncode == 0
+        key = f'nba_{kind}'
+        state['samples'][-1][key] = done
+        r = pace(state['samples'], key) or 3000
+        left = max(total - done, 0) if run else 0
+        tasks.append({'name': label, 'plain': plain,
+                      'status': 'running' if run else 'done' if done else 'waiting',
+                      'done': min(done, total) if total else done, 'total': total, 'unit': 'games downloaded',
+                      'detail': f'{left:,} still to download' if run else 'Download finished; loaded into the database.',
+                      'eta': fmt_duration(left / r) if left else None,
+                      'next': 'Then the results are loaded and the coverage report is recalculated.', 'recent': []})
     # 3. load ABA boxes
     loaded = db.get('aba_box_games', 0) or 0
     tasks.append({
