@@ -23,3 +23,9 @@ sed -e "s#__REPO__#$app#g" -e "s/__H1__/${hours[1]}/" -e "s/__H2__/${hours[2]}/"
 launchctl bootout "gui/$(id -u)" "$dest" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$dest"
 echo "installed $dest -> $app (local hours ${hours[*]})"
+# nightly gap chasing at 01:00 local time
+chase="$HOME/Library/LaunchAgents/com.nba-warehouse.chase-gaps.plist"
+sed -e "s#__REPO__#$app#g" -e "s/__H1__/1/" "$repo/warehouse/launchd/com.nba-warehouse.chase-gaps.plist.template" > "$chase"
+launchctl bootout "gui/$(id -u)" "$chase" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$chase"
+echo "installed $chase (01:00 nightly)"

@@ -5,8 +5,35 @@ scores, quarter scores, team and player box scores, play-by-play and shot charts
 plus draft, awards, coaches, rosters, referees, lineups, transactions, salaries and betting lines.
 
 **This repository holds the code and documentation only.** The database itself (a single DuckDB
-file, `data/nba-warehouse.duckdb`) is built locally from sources whose terms do not allow
-redistribution, so it is not published here.
+file, `data/nba-warehouse.duckdb`, ~45 GB) is built locally from sources whose terms do not allow
+redistribution, so it is not published here. `data/` is a symlink to
+`~/Library/Application Support/NBA Warehouse/data` (outside `~/Documents`, so the scheduled jobs can
+read it without extra macOS permissions).
+
+## What's in `core`
+
+| Area | Tables | Coverage |
+|---|---|---|
+| Games, results, standings | `dim_game`, `fact_game_result`, `fact_regular_standings` | every NBA/BAA game since Nov 1946; current season refreshed daily |
+| Quarter scores | `fact_game_period_score` | ~98% of games; gaps chased nightly |
+| Box scores | `fact_team_game_stats`, `fact_player_game_stats` | >99.8% of games |
+| Play-by-play, shots | `fact_play_event`, `fact_shot`, `field_goal_attempt` | 1996-97 onward (not recorded before) |
+| ABA (1967-76) | `aba_game`, `aba_game_result`, `aba_regular_standings`, `aba_team_game_stats`, `aba_player_game_stats` | all 4,149 games; boxes as they are collected |
+| People and teams | `dim_person`, `person_source_id`, `dim_team`, `team_source_id` | permanent ids; crosswalks to Basketball-Reference and other sources |
+| Draft, combine, awards | `fact_draft_pick`, `fact_draft_combine`, `fact_award_vote`, `fact_player_honor`, `fact_all_star_selection`, `fact_player_award` | 1947-2025 |
+| Rosters, transactions | `fact_roster_spell` (dated), `bridge_player_team_season`, `fact_transaction`, `bridge_transaction_party` | all seasons; NBA.com moves from 2015 |
+| Salaries | `fact_player_salary` | 1984-85 to 2025-26 |
+| Coaches, referees, lineups | `fact_coach_season`, `fact_game_official`, `fact_starting_lineup`, `fact_inactive_player`, `fact_rotation_stint` | see `audit.domain_coverage` |
+| Tracking | `fact_tracking_season`, `fact_player_season_estimated`, `fact_season_matchup` | 2013-14 onward (not tracked before) |
+
+Every promoted area has a row in `audit.domain_disposition` (source rows = published + duplicate +
+held) and held rows in `audit.domain_held` with a reason. `audit.game_coverage` / `audit.domain_coverage`
+label every game x area as present, partial, missing_recoverable, source_unavailable, disputed,
+not_tracked or not_applicable; `audit.open_gaps` lists what is still being chased.
+
+Identity judgments that rules could not settle (same-name players across sources) were made with
+TypeSafe Jev (`warehouse/judge_identities.py`); only confident one-to-one "same person" verdicts were
+linked, and every verdict with its probabilities is in `audit.jev_identity_judgment`.
 
 ## Layout of the database
 
@@ -40,9 +67,9 @@ A value is held only when two sources of the same rank disagree and nothing high
 Requires [uv](https://docs.astral.sh/uv/) and DuckDB 2.0.0 (pulled in by `uv`).
 
 ```sh
-# 1. single warehouse from the original snapshot + the last historical release + current season
+# 1. one-time migration (already done; its inputs - the original snapshot and releases v1-v26 - were
+#    retired after verification, see "History")
 uv run --no-project --with duckdb==2.0.0 python warehouse/build_warehouse.py build
-uv run --no-project --with duckdb==2.0.0 python warehouse/build_warehouse.py verify
 
 # 2. Kaggle datasets (needs KAGGLE_USERNAME / KAGGLE_KEY)
 warehouse/fetch_kaggle.sh
@@ -51,7 +78,23 @@ uv run --no-project --with duckdb==2.0.0 python warehouse/load_kaggle.py
 # 3. betting links, non-game domains
 uv run --no-project --with duckdb==2.0.0 python warehouse/betting.py
 uv run --no-project --with duckdb==2.0.0 python warehouse/promote_domains.py
+
+# 4. new sources: Basketball-Reference pages (paced), NBA.com tracking, then promotion
+python3 warehouse/crawl_bref.py transactions aba_schedule
+uv run --no-project --with nba_api --with duckdb==2.0.0 python warehouse/fetch_nba_tracking.py fetch
+uv run --no-project --with nba_api --with duckdb==2.0.0 python warehouse/fetch_nba_tracking.py load
+uv run --no-project --with duckdb==2.0.0 python warehouse/load_bref.py
+uv run --no-project --with duckdb==2.0.0 python warehouse/promote_new_sources.py
+uv run --no-project --with duckdb==2.0.0 python warehouse/coverage.py
 ```
+
+### Gap chasing
+
+`warehouse/chase_gaps.py all` runs nightly at 01:00 (launchd): it works through games without quarter
+scores via Basketball-Reference box pages (admitting a line score only when it is the same fixture, sums
+to the official final and is tied before any overtime), caches ABA box pages, then loads and promotes
+them and refreshes the coverage ledger. It is resumable, one request every 6.5 s, and stops on any block.
+Install both scheduled jobs with `warehouse/launchd/install.sh`.
 
 ### Daily refresh
 
@@ -72,5 +115,6 @@ keeps each one's per-table row counts and content hashes, and `audit.legacy_rele
 Data comes from free sources used for personal research at polite request rates: NBA.com statistics
 and official PDFs, archived nba.com pages (Wayback Machine), Library of Congress newspaper scans,
 Basketball-Reference (≥ 6.5 s between requests, robots.txt respected), SportsDataverse releases and
-public Kaggle datasets. Sites that refuse automated agents (e.g. via robots.txt or bot protection)
+328 public Kaggle datasets (list in `warehouse/kaggle_catalog.csv`). HoopsHype's robots.txt refuses AI
+agents, so it is not crawled; HoopsHype figures appear only via a public Kaggle dataset. Sites that refuse automated agents (e.g. via robots.txt or bot protection)
 are not used. Each source's own terms apply to the data; this repository's license covers the code.

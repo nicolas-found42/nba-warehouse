@@ -140,8 +140,12 @@ DOMAINS: list[Domain] = [
            fks={'person_id': 'core.dim_person(person_id)', 'team_id': 'core.dim_team(team_id)',
                 'season_year': 'core.dim_season(season_year)'},
            not_null=['person_id', 'team_id', 'season_year']),
-    Domain('fact_starting_lineup', 'raw.fact_starting_lineup_player (game starters, 1996-)',
-           '''SELECT game_id, team_id, person_id, starting_position FROM raw.fact_starting_lineup_player''',
+    Domain('fact_starting_lineup', 'raw.fact_starting_lineup_player (1996-) + box-score starting positions where no lineup row exists',
+           '''SELECT game_id, team_id, person_id, starting_position, 'nba_starting_lineup' AS source FROM raw.fact_starting_lineup_player
+              UNION ALL
+              SELECT game_id, team_id, person_id, starting_position, 'box_score_starting_position' FROM core.fact_player_game_stats
+              WHERE nullif(trim(starting_position), '') IS NOT NULL
+                AND game_id NOT IN (SELECT game_id FROM raw.fact_starting_lineup_player)''',
            key=['game_id', 'person_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'person_id': 'core.dim_person(person_id)',
                 '(game_id, team_id)': 'core.bridge_game_team(game_id, team_id)'},
@@ -159,15 +163,21 @@ DOMAINS: list[Domain] = [
            fks={'game_id': 'core.dim_game(game_id)', 'person_id': 'core.dim_person(person_id)',
                 '(game_id, team_id)': 'core.bridge_game_team(game_id, team_id)'},
            not_null=['game_id', 'team_id', 'person_id', 'in_time_real']),
-    Domain('dim_official', 'raw.dim_official + raw.officials (NBA referee ids)',
-           '''SELECT try_cast(official_id AS BIGINT) AS official_id, any_value(first_name) AS first_name,
-                     any_value(last_name) AS last_name, any_value(jersey_num) AS jersey_num
-              FROM (SELECT official_id::VARCHAR AS official_id, first_name, last_name, jersey_num FROM raw.dim_official
-                    UNION ALL SELECT official_id, first_name, last_name, jersey_num FROM raw.officials)
-              GROUP BY 1''',
+    Domain('dim_official', 'raw.dim_official + raw.officials (NBA referee ids) + ESPN-resolved officials',
+           '''SELECT official_id, any_value(first_name) AS first_name, any_value(last_name) AS last_name, any_value(jersey_num) AS jersey_num
+              FROM (SELECT try_cast(official_id AS BIGINT) AS official_id, first_name, last_name, jersey_num, 1 AS pref FROM raw.dim_official
+                    UNION ALL SELECT try_cast(official_id AS BIGINT), first_name, last_name, jersey_num, 1 FROM raw.officials
+                    UNION ALL SELECT official_id, split_part(espn_official_full_name, ' ', 1),
+                                     trim(substr(espn_official_full_name, length(split_part(espn_official_full_name, ' ', 1)) + 2)), NULL, 2
+                    FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL)
+              GROUP BY 1 HAVING bool_or(pref = 1) OR true''',
            key=['official_id'], not_null=['official_id']),
-    Domain('fact_game_official', 'raw.officials (NBA box-score officials, 1996-2023)',
-           '''SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num FROM raw.officials''',
+    Domain('fact_game_official', 'raw.officials (NBA box-score officials, 1996-2023); ESPN-resolved officials only for games NBA data lacks',
+           '''SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num, 'nba_box_summary' AS source FROM raw.officials
+              UNION ALL
+              SELECT game_id, official_id, NULL, 'espn' FROM raw.bridge_official_espn
+              WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL AND game_id IS NOT NULL
+                AND game_id NOT IN (SELECT game_id FROM raw.officials)''',
            key=['game_id', 'official_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'official_id': 'core.dim_official(official_id)'},
            not_null=['game_id', 'official_id']),

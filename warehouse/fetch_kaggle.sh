@@ -21,7 +21,7 @@ fetch() {
 python3 - <<'PY' | while read -r ref; do fetch "$ref"; done
 import csv, re
 bad = re.compile(r'shot-class|topshot|detection|yolo|pose|segment|frames|court-detect|ball-track', re.I)
-for r in csv.DictReader(open('data/kaggle/_catalog.csv')):
+for r in csv.DictReader(open('warehouse/kaggle_catalog.csv')):
     if not bad.search(r['ref'] + r['title']) and int(r['size']) < 5e9:
         print(r['ref'])
 PY

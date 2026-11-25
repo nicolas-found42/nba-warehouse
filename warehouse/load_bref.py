@@ -152,9 +152,25 @@ def team_seasons(c: duckdb.DuckDBPyConnection) -> None:
     print('team-season rows', len(out))
 
 
+def boxscores(c: duckdb.DuckDBPyConnection) -> None:
+    """Basic box-score tables (players and team totals) from every cached box score page."""
+    out = []
+    for f in sorted((CACHE / 'boxscores').glob('*.html')):
+        page = uncomment(f.read_text('utf-8'))
+        for tid in re.findall(r'<table[^>]*id="(box-[A-Z0-9]+-game-basic)"', page):
+            team = tid.split('-')[1]
+            for i, r in enumerate(rows_of_table(page, tid)):
+                key = re.sub(r'.*/([^/]+)\.html$', r'\1', r.get('player__href', '')) if r.get('player__href') else None
+                out.append((f.stem, team, i, key, r.get('player'), json.dumps(r)))
+    c.execute('''CREATE OR REPLACE TABLE raw.bref_box_row (bref_game_key VARCHAR, team_abbr VARCHAR, row_index INTEGER,
+        bref_player_id VARCHAR, label VARCHAR, row_json JSON)''')
+    c.executemany('INSERT INTO raw.bref_box_row VALUES (?,?,?,?,?,?)', out)
+    print('box rows', len(out))
+
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('parts', nargs='*', default=['transactions', 'schedules', 'team_seasons'])
+    ap.add_argument('parts', nargs='*', default=['transactions', 'schedules', 'boxscores'])
     ap.add_argument('--output', type=Path, default=DEFAULT_OUT)
     a = ap.parse_args()
     con = duckdb.connect(str(a.output))

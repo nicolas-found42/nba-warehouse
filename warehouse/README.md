@@ -1,3 +1,8 @@
+> **Superseded.** These release notes describe the incremental releases v1-v26 that preceded the single
+> warehouse. Those files were retired on 2026-11-24 after verification; their contents live on in
+> `data/nba-warehouse.duckdb` (core = v26 + later additions, audit = every ledger) and each file's
+> per-table hashes are in `audit.legacy_release_fingerprint`. The commands below no longer run as written.
+
 # NBA warehouse: games, box scores, periods, plays, and shots
 
 **Latest historical build:** `../data/nba-clean-v26.duckdb` (DuckDB 2.0.0, personal/local use). This release adds **90 period rows across 11 October 2006 preseason games**, including Toronto–Boston overtime. **73,610 of 75,268** games have accepted periods, leaving **1,658** gaps (**1,431** before 1960). **119 of 120** 2006–07 preseason games have periods; Efes Pilsen at Golden State (`0010600026`) remains open. Use `audit.period_availability_v26` and `audit.preseason_period_receipt_v26`. The original pages are local evidence, not cleared for redistribution.

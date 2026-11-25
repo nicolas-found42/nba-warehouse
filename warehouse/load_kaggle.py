@@ -129,7 +129,7 @@ def main() -> None:
     ap.add_argument('--output', type=Path, default=DEFAULT_OUT)
     ap.add_argument('--only', nargs='*')
     a = ap.parse_args()
-    catalog = {r['ref']: r for r in csv.DictReader((KAGGLE / '_catalog.csv').open())}
+    catalog = {r['ref']: r for r in csv.DictReader((ROOT / 'warehouse' / 'kaggle_catalog.csv').open())}
     c = connect(a.output)
     for ext in ('sqlite', 'excel'):
         c.execute(f'INSTALL {ext}; LOAD {ext}')

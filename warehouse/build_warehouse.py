@@ -56,6 +56,21 @@ def connect(path: Path, read_only: bool = False) -> duckdb.DuckDBPyConnection:
         'temp_directory': str(tmp), 'preserve_insertion_order': True})
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def warehouse_lock():
+    """Exclusive lock for writers of the live warehouse (daily refresh swaps the file; gap chasing appends)."""
+    import fcntl
+    with (DATA / '.warehouse.lock').open('a') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def attach_sources(c: duckdb.DuckDBPyConnection) -> None:
     c.execute(f'ATTACH {lit(str(RAW_SRC))} AS src_raw (READ_ONLY)')
     c.execute(f'ATTACH {lit(str(HIST_SRC))} AS src_hist (READ_ONLY)')

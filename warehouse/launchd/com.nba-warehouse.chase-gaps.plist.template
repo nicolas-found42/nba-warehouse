@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nba-warehouse.chase-gaps</string>
+  <key>ProgramArguments</key>
+  <array><string>__REPO__/warehouse/launchd/run_chase.sh</string></array>
+  <!-- 01:00 local time nightly; resumable, exits when the queues are empty -->
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>__H1__</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>__REPO__/data/crawl-logs/chase.log</string>
+  <key>StandardErrorPath</key><string>__REPO__/data/crawl-logs/chase.log</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>5</integer>
+</dict>
+</plist>
+

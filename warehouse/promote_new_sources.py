@@ -363,6 +363,96 @@ def salaries(c) -> None:
                 c.execute('SELECT count(*) FROM sal_all').fetchone()[0])
 
 
+def aba_boxes(c) -> None:
+    """ABA team and player box scores from cached Basketball-Reference box pages (raw.bref_box_row)."""
+    if not c.execute("SELECT count(*) FROM duckdb_tables() WHERE schema_name='raw' AND table_name='bref_box_row'").fetchone()[0]:
+        print('aba_boxes: no box pages loaded yet'); return
+    n = "try_cast(r.row_json->>'{f}' AS INTEGER)"
+    stats = ', '.join(f"{n.format(f=f)} AS {f}" for f in ('fg', 'fga', 'fg3', 'fg3a', 'ft', 'fta', 'orb', 'drb', 'trb', 'ast', 'stl', 'blk', 'tov', 'pf', 'pts'))
+    c.execute(f'''CREATE OR REPLACE TEMP TABLE abox AS
+        SELECT k.game_id, g.season_start + 1 AS season_end_year, r.team_abbr, r.bref_player_id, r.label,
+               {BREF_TEAM.format(k='r.team_abbr', y='g.season_start + 1')} AS team_id,
+               {BREF_PERSON.format(k='r.bref_player_id')} AS person_id,
+               r.row_json->>'mp' AS minutes_text, r.row_json->>'reason' AS dnp_reason, {stats}
+        FROM raw.bref_box_row r JOIN core.aba_game_key k ON k.bref_game_key = r.bref_game_key
+        JOIN core.aba_game g ON g.game_id = k.game_id''')
+    c.execute('''CREATE OR REPLACE TABLE core.aba_team_game_stats AS
+        SELECT game_id, team_id, fg AS fgm, fga, fg3 AS fg3m, fg3a, ft AS ftm, fta, orb AS oreb, drb AS dreb, trb AS reb, ast, stl, blk,
+               tov, pf, pts FROM abox WHERE label = 'Team Totals' AND team_id IS NOT NULL''')
+    c.execute('''CREATE OR REPLACE TABLE core.aba_player_game_stats AS
+        SELECT game_id, person_id, team_id, CASE WHEN dnp_reason IS NOT NULL THEN 'did_not_play' ELSE 'played' END AS participation_status,
+               minutes_text, fg AS fgm, fga, fg3 AS fg3m, fg3a, ft AS ftm, fta, orb AS oreb, drb AS dreb, trb AS reb, ast, stl, blk, tov, pf, pts
+        FROM abox WHERE label <> 'Team Totals' AND label <> 'Reserves' AND label <> 'Starters' AND person_id IS NOT NULL AND team_id IS NOT NULL''')
+    c.execute("DELETE FROM audit.domain_held WHERE domain = 'aba_player_game_stats'")
+    c.execute('''INSERT INTO audit.domain_held SELECT 'aba_player_game_stats', NULL,
+            CASE WHEN team_id IS NULL THEN 'unresolved_team' ELSE 'unresolved_person' END, to_json(a)
+        FROM abox a WHERE label NOT IN ('Team Totals', 'Reserves', 'Starters') AND (person_id IS NULL OR team_id IS NULL)''')
+    # team totals must equal the official final, and player points must sum to team points
+    c.execute('''CREATE OR REPLACE TABLE audit.aba_box_check AS
+        SELECT t.game_id, t.team_id, t.pts AS team_pts,
+               CASE WHEN t.team_id = g.home_team_id THEN r.home_score ELSE r.away_score END AS final_pts,
+               (SELECT sum(p.pts) FROM core.aba_player_game_stats p WHERE p.game_id = t.game_id AND p.team_id = t.team_id) AS player_pts
+        FROM core.aba_team_game_stats t JOIN core.aba_game g USING (game_id) JOIN core.aba_game_result r USING (game_id)''')
+    print('aba boxes: teams', c.execute('SELECT count(*), count(*) FILTER (WHERE team_pts = final_pts), count(*) FILTER (WHERE player_pts = team_pts) FROM audit.aba_box_check').fetchone())
+    disposition(c, 'aba_player_game_stats', 'raw.bref_box_row (ABA)',
+                c.execute("SELECT count(*) FROM abox WHERE label NOT IN ('Team Totals', 'Reserves', 'Starters')").fetchone()[0])
+
+
+def rosters(c) -> None:
+    """Dated roster spells: who was on which team between which dates.
+
+    A spell is a run of consecutive games for one team (from box scores, NBA/BAA and ABA). Its start moves back to
+    the latest transaction bringing the player to that team after his previous game, and its end moves forward to
+    the earliest transaction taking him away (traded from / waived / released) before his next spell; otherwise
+    the first and last game dates stand and date_basis says so.
+    """
+    has_aba = c.execute("SELECT count(*) FROM duckdb_tables() WHERE schema_name='core' AND table_name='aba_player_game_stats'").fetchone()[0]
+    c.execute('''CREATE OR REPLACE TEMP TABLE appear AS
+        SELECT p.person_id, p.team_id, g.game_date FROM core.fact_player_game_stats p JOIN core.dim_game g USING (game_id)
+        WHERE p.participation_status = 'played' AND p.person_id IS NOT NULL
+          AND g.season_type IN ('Regular', 'Playoffs', 'PlayIn', 'Preseason', 'Cup')   -- club games only (no All-Star squads)
+          AND p.team_id IN (SELECT team_id FROM core.dim_team_version WHERE team_kind = 'nba_franchise')''' + ('''
+        UNION ALL
+        SELECT p.person_id, p.team_id, g.game_date FROM core.aba_player_game_stats p JOIN core.aba_game g USING (game_id)
+        WHERE p.participation_status = 'played' AND g.season_type <> 'AllStar' ''' if has_aba else ''))
+    c.execute('''CREATE OR REPLACE TEMP TABLE spell AS
+        WITH o AS (SELECT DISTINCT person_id, team_id, game_date FROM appear),
+             s AS (SELECT *, CASE WHEN team_id IS DISTINCT FROM lag(team_id) OVER w THEN 1 ELSE 0 END AS brk
+                   FROM o WINDOW w AS (PARTITION BY person_id ORDER BY game_date, team_id)),
+             n AS (SELECT *, sum(brk) OVER (PARTITION BY person_id ORDER BY game_date, team_id) AS spell_no FROM s)
+        SELECT person_id, spell_no, any_value(team_id) AS team_id, min(game_date) AS first_game, max(game_date) AS last_game,
+               count(*) AS games FROM n GROUP BY person_id, spell_no''')
+    c.execute('''CREATE OR REPLACE TEMP TABLE moves AS
+        SELECT t.transaction_date, t.kind, t.transaction_id, p.person_id, tm.team_id, tm.role
+        FROM core.fact_transaction t JOIN core.bridge_transaction_party p USING (transaction_id)
+        JOIN core.bridge_transaction_party tm ON tm.transaction_id = t.transaction_id AND tm.team_id IS NOT NULL
+        WHERE p.role = 'player' AND p.person_id IS NOT NULL
+        UNION ALL  -- NBA.com movement rows name the team on the player's own row (direction not stated)
+        SELECT t.transaction_date, t.kind, t.transaction_id, p.person_id, p.team_id, 'team'
+        FROM core.fact_transaction t JOIN core.bridge_transaction_party p USING (transaction_id)
+        WHERE p.role = 'player' AND p.person_id IS NOT NULL AND p.team_id IS NOT NULL''')
+    c.execute('''CREATE OR REPLACE TABLE core.fact_roster_spell AS
+        WITH b AS (SELECT s.*, lag(last_game) OVER (PARTITION BY person_id ORDER BY spell_no) AS prev_last,
+                          lead(first_game) OVER (PARTITION BY person_id ORDER BY spell_no) AS next_first FROM spell s)
+        SELECT b.person_id, b.team_id, b.spell_no,
+               coalesce((SELECT max(m.transaction_date) FROM moves m WHERE m.person_id = b.person_id AND m.team_id = b.team_id
+                          AND m.role IN ('to_team', 'team') AND m.kind IN ('trade', 'signed', 'claimed_waivers', 'sold', 'drafted', 'converted_contract')
+                          AND m.transaction_date <= b.first_game AND m.transaction_date > coalesce(b.prev_last, DATE '1900-01-01')),
+                        b.first_game) AS start_date,
+               coalesce((SELECT min(m.transaction_date) FROM moves m WHERE m.person_id = b.person_id AND m.team_id = b.team_id
+                          AND ((m.role = 'from_team' AND m.kind IN ('trade', 'sold')) OR m.kind IN ('waived', 'released'))
+                          AND m.transaction_date >= b.last_game AND m.transaction_date < coalesce(b.next_first, DATE '2999-01-01')),
+                        b.last_game) AS end_date,
+               b.first_game, b.last_game, b.games
+        FROM b ORDER BY person_id, spell_no''')
+    c.execute('''ALTER TABLE core.fact_roster_spell ADD COLUMN date_basis VARCHAR;
+        UPDATE core.fact_roster_spell SET date_basis = CASE
+            WHEN start_date < first_game AND end_date > last_game THEN 'transactions_both_ends'
+            WHEN start_date < first_game THEN 'transaction_start_game_end'
+            WHEN end_date > last_game THEN 'game_start_transaction_end' ELSE 'game_dates_only' END''')
+    print('roster spells', c.execute('SELECT date_basis, count(*) FROM core.fact_roster_spell GROUP BY 1 ORDER BY 2 DESC').fetchall())
+
+
 def views(c) -> None:
     """Core views spanning sources: current-season shot attempts, and opt-in all-pro-leagues views (NBA/BAA + ABA)."""
     old = c.execute("SELECT sql FROM duckdb_views() WHERE schema_name='core' AND view_name='field_goal_attempt'").fetchone()[0]
@@ -408,7 +498,7 @@ def tracking(c) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('parts', nargs='*', default=['identities', 'transactions', 'aba', 'salaries', 'tracking', 'views'])
+    ap.add_argument('parts', nargs='*', default=['identities', 'transactions', 'aba', 'salaries', 'tracking', 'rosters', 'views'])
     ap.add_argument('--output', type=Path, default=DEFAULT_OUT)
     a = ap.parse_args()
     c = connect(a.output)

@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 
-from build_warehouse import DEFAULT_OUT, ROOT, connect, lit, q
+from build_warehouse import DEFAULT_OUT, ROOT, connect, lit, q, warehouse_lock
 
 ET = ZoneInfo('America/New_York')
 EVIDENCE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence'
@@ -230,7 +230,8 @@ def main() -> int:
             hist, prior, prev = export_inputs(a.warehouse, work)
             snap = work / 'snapshot.duckdb'
             build_snapshot(assets, cutoff, hist, prior, prev, snap)
-            result = merge(a.warehouse, snap, cutoff, dt.datetime.now(dt.timezone.utc), work)
+            with warehouse_lock():  # no other writer may touch the file between clone and swap
+                result = merge(a.warehouse, snap, cutoff, dt.datetime.now(dt.timezone.utc), work)
         report.write_text(f'committed cutoff {cutoff}\n{json.dumps(result, indent=2)}\n')
         print(report.read_text())
         return 0
