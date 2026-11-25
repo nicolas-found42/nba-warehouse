@@ -15,7 +15,7 @@ from dataclasses import astuple, dataclass, replace
 from itertools import groupby
 from pathlib import Path
 from threading import Lock
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -146,13 +146,26 @@ def slots(day: dt.date):
                 yield stamp, report_filename(stamp)
 
 
+def fetch_body(url: str) -> bytes:
+    request = Request(url, headers={'User-Agent': 'NBAWarehouse-Research/1.0'})
+    for retry_delay in (1, 2, None):
+        try:
+            with urlopen(request, timeout=30) as response:
+                return response.read(12_000_000)
+        except HTTPError:
+            raise
+        except (ConnectionError, TimeoutError, URLError):
+            if retry_delay is None:
+                raise
+            time.sleep(retry_delay)
+
+
 def download(url: str, dest: Path, recent: bool = False) -> None:
     missing = dest.with_suffix('.missing')
     if dest.is_file() or (not recent and missing.is_file()):
         return
     try:
-        with urlopen(Request(url, headers={'User-Agent': 'NBAWarehouse-Research/1.0'}), timeout=30) as response:
-            body = response.read(12_000_000)
+        body = fetch_body(url)
         signature = b'%PDF-' if dest.suffix == '.pdf' else b'PAR1'
         if not body.startswith(signature):
             raise ValueError(f'unexpected document format: {url}')
@@ -168,10 +181,12 @@ def download(url: str, dest: Path, recent: bool = False) -> None:
 
 
 def capture_days(days, now: dt.datetime, workers: int = 1) -> list[Path]:
+    live_window = now.date() - dt.timedelta(days=1)
+
     def capture(slot):
         stamp, name = slot
         target = CACHE / 'pdf' / name
-        download(NBA + name, target, recent=stamp > now - dt.timedelta(hours=2))
+        download(NBA + name, target, recent=stamp.date() >= live_window)
         return target if target.is_file() else None
 
     saved = []

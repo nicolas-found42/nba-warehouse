@@ -357,6 +357,8 @@ access restrictions establish only that the requested route could not be checked
 
 - The NBA PDF cache keeps printed timestamps, statuses and notices. The season mirror covers 2019–2027 and contains
   selected pregame snapshots. Strict pregame queries corroborate identities with the roster available at the cutoff.
+  Daily refresh rechecks missing URLs for the current and previous publication days and retries transient connection
+  failures. Ordinary public retries recovered original PDFs after temporary CDN or archive responses failed to serve a PDF.
   Final-report reconciliation can use the later game box and official inactive list to verify a game-team identity.
   The final view exposes available box-score participation and official inactive status in separate columns and keeps
   unresolved source player IDs. The direct historical

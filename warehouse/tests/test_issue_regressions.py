@@ -1,4 +1,5 @@
 import datetime as dt
+import io
 from pathlib import Path
 
 import duckdb
@@ -45,6 +46,37 @@ def test_injury_pdf_filename_transition_is_midday():
     assert monday['08:45'] == 'Injury-Report_2025-12-22_08AM.pdf'
     assert monday['09:00'] == 'Injury-Report_2025-12-22_09_00AM.pdf'
     assert monday['09:15'] == 'Injury-Report_2025-12-22_09_15AM.pdf'
+
+
+def test_daily_injury_capture_retries_misses_from_yesterday(monkeypatch, tmp_path):
+    import injury_reports
+
+    now = dt.datetime(2026, 11, 25, 18, tzinfo=ET)
+    dates = [now.date() - dt.timedelta(days=offset) for offset in (2, 1, 0)]
+    retries = []
+    monkeypatch.setattr(injury_reports, 'CACHE', tmp_path)
+    monkeypatch.setattr(injury_reports, 'slots', lambda day: [(dt.datetime.combine(day, dt.time(8), ET), f'{day}.pdf')])
+    monkeypatch.setattr(injury_reports, 'download', lambda _, target, recent: retries.append((target.name, recent)))
+    injury_reports.capture_days(dates, now)
+    assert retries == [(f'{day}.pdf', recent) for day, recent in zip(dates, (False, True, True))]
+
+
+def test_injury_pdf_download_recovers_from_connection_reset(monkeypatch, tmp_path):
+    import injury_reports
+
+    responses = iter((None, b'%PDF-1.4'))
+
+    def get_response(*args, **kwargs):
+        response = next(responses)
+        if response is None:
+            raise ConnectionResetError('temporary connection reset')
+        return io.BytesIO(response)
+
+    monkeypatch.setattr(injury_reports, 'urlopen', get_response)
+    monkeypatch.setattr(injury_reports.time, 'sleep', lambda _: None)
+    path = tmp_path / 'injury.pdf'
+    injury_reports.download('https://example.com/injury.pdf', path)
+    assert path.read_bytes() == b'%PDF-1.4'
 
 
 def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():
