@@ -1,6 +1,7 @@
 """Load date-stamped NBA opening and restart roster publications."""
 from __future__ import annotations
 
+import csv
 import datetime as dt
 import hashlib
 import re
@@ -36,6 +37,7 @@ class RosterRelease:
     effective_on: dt.date
     teams: int
     title: str
+    reviewed_rows: tuple[str, str, int] | None = None
 
 
 RELEASES = (
@@ -44,10 +46,45 @@ RELEASES = (
                   'https://pr.nba.com/rosters-set-for-2018-19-nba-regular-season/',
                   dt.datetime.fromisoformat('2018-10-16T01:06:45+00:00'), dt.date(2018, 10, 16), 30,
                   '2018-19 NBA REGULAR SEASON OPENING ROSTERS'),
+    RosterRelease('opening-followup/league-2019-nba-static.pdf', 'be3be677bd0cc256577e512f6d9f18f19df20035e09a0d6e5a6bd831ea169d1f',
+                  'https://ak-static.cms.nba.com/wp-content/uploads/sites/46/2019/10/2019-20-Regular-Season-Rosters.pdf',
+                  'https://kysports.tv/2019/10/uk-leads-nation-with-29-players-on-nba-opening-day-rosters-2/',
+                  dt.datetime.fromisoformat('2019-10-22T22:33:15Z'), dt.date(2019, 10, 22), 30,
+                  '2019-20 NBA REGULAR SEASON OPENING ROSTERS',
+                  ('opening-followup/league-2019-roster-release-rows.csv',
+                   '2a7dfa98e7e5ec4151fc75b3474a51aa718b95d9f2fc6ed3714071a4030c3b4d', 496)),
     RosterRelease('restart-2020.pdf', 'e2f1e8cd6e2da970164aa9cc2c3bcdb5ed0cbf7de0237311bf4c8e245cb9adb5',
                   'https://ak-static.cms.nba.com/wp-content/uploads/sites/46/2020/07/Restart-Rosters-7-19-20.pdf',
                   'https://www.nba.com/news/nba-announces-teamrosters-season-restart-orlando',
                   dt.datetime.fromisoformat('2020-07-21T04:00:00+00:00'), dt.date(2020, 7, 30), 22, 'RESTART ROSTERS'),
+    RosterRelease('opening-2020.pdf', '75a981d64c87de34f7d7896f3a0b1e695b1ed0a3c0e8d4b6638cef71c489ffa0',
+                  'https://ak-static.cms.nba.com/wp-content/uploads/sites/46/2020/12/2020-21-Opening-Day-Rosters-12-22-20.pdf',
+                  'https://inplaymagazine.com/2020-21-nba-regular-season-rosters/',
+                  dt.datetime.fromisoformat('2020-12-22T16:43:50Z'), dt.date(2020, 12, 22), 30,
+                  '2020-21 NBA REGULAR SEASON OPENING ROSTERS',
+                  ('opening-followup/league-2020-roster-release-rows.csv',
+                   'c7718c0361e4776d719badd8e4163367aa407f04d2edac15135a1fc100fb69a0', 495)),
+    RosterRelease('opening-followup/league-2021-kentucky-mirror.pdf', 'a28ef3ef7933c20847ab635aec981d9558608fbf6778ee0e14caac1c13aa2637',
+                  'https://s3.amazonaws.com/ukathletics.com/documents/2021/10/19/2021_22_Opening_Day_Rosters_10_18_21.pdf',
+                  'https://gleague.nba.com/news/nba-g-league-alumni-in-the-nba-2021-22-opening-night',
+                  dt.datetime.fromisoformat('2021-10-19T18:33:22Z'), dt.date(2021, 10, 19), 30,
+                  '2021-22 NBA REGULAR SEASON OPENING ROSTERS',
+                  ('opening-followup/league-2021-roster-release-rows.csv',
+                   '2c95d81ab69347510605b879f084cf02fc632cbf77ec5a2abdb9fac42a559e2c', 500)),
+    RosterRelease('opening-followup/league-2022-press-mirror.pdf', '8811edf670b76a0205720f88e82192e54c2f8b865aeb37a61bb29141c6590c7e',
+                  'https://bloximages.chicago2.vip.townnews.com/tucson.com/content/tncms/assets/v3/editorial/4/78/478ce2c8-4e70-11ed-9499-37242ad5c1f5/634ddff91abf0.pdf.pdf',
+                  'https://thisistucson.com/sports/arizonawildcats/basketball/ten-ex-arizona-wildcats-land-on-nba-season-opening-rosters/article_b1103454-4e6e-11ed-be7b-1349ed52de7e.html',
+                  dt.datetime.fromisoformat('2022-10-18T06:15:00Z'), dt.date(2022, 10, 18), 30,
+                  'ROSTERS SET FOR 2022-23 NBA REGULAR SEASON',
+                  ('opening-followup/league-2022-roster-release-rows.csv',
+                   'ccbe0307ad8f366121ccf73674587d52767ba9335f4e8ce10a3be0add86c1c8c', 497)),
+    RosterRelease('opening-followup/league-2023-press-mirror.pdf', 'c122900f6a322dc7aac4aa5d1096d185e652bd439d79595106bc35eb130178f7',
+                  'https://bloximages.chicago2.vip.townnews.com/tucson.com/content/tncms/assets/v3/editorial/b/52/b52fd976-71ff-11ee-8fbf-d7479459d4aa/653708216e38d.pdf.pdf',
+                  'https://thisistucson.com/nba-opening-rosters-2023-24/pdf_b52fd976-71ff-11ee-8fbf-d7479459d4aa.html',
+                  dt.datetime.fromisoformat('2023-10-23T23:56:17Z'), dt.date(2023, 10, 24), 30,
+                  'ROSTERS SET FOR 2023-24 NBA REGULAR SEASON',
+                  ('opening-followup/league-2023-roster-release-rows.csv',
+                   '4b388a186ec2a44b77a7dd6447a2fa3aa37b53f1cd11a4aa487e798b87af7673', 525)),
 )
 
 
@@ -91,6 +128,24 @@ def parse_rosters(text: str, release: RosterRelease) -> dict[int, list[tuple[str
     return rosters
 
 
+def read_reviewed_rosters(release: RosterRelease) -> dict[int, list[tuple[str, str]]]:
+    filename, digest, expected_count = release.reviewed_rows
+    raw = (CACHE / filename).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError(f'reviewed roster rows have changed: {filename}')
+    rosters = defaultdict(list)
+    for row in csv.DictReader(raw.decode().splitlines()):
+        if (dt.datetime.fromisoformat(row['source_available_at']) != release.available_at
+                or dt.date.fromisoformat(row['effective_on']) != release.effective_on
+                or row['source_url'] != release.source_url
+                or Path(row['source_file']).name != Path(release.filename).name):
+            raise ValueError(f'roster row does not match the reviewed release: {filename}')
+        rosters[TEAM_IDS[row['team'].replace('.', '')]].append((row['player_printed'], row['status']))
+    if len(rosters) != release.teams or sum(map(len, rosters.values())) != expected_count:
+        raise ValueError(f'unexpected number of reviewed roster rows: {filename}')
+    return rosters
+
+
 def load(c) -> None:
     people = defaultdict(set)
     for person_id, name in c.execute('SELECT person_id,display_name FROM core.dim_person WHERE display_name IS NOT NULL').fetchall():
@@ -103,8 +158,11 @@ def load(c) -> None:
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() != release.sha256:
             raise ValueError(f'reviewed roster release has changed: {release.filename}')
-        layout = subprocess.run(['pdftotext', '-layout', '-', '-'], input=raw, check=True, capture_output=True).stdout.decode()
-        teams = parse_rosters(layout, release)
+        if release.reviewed_rows:
+            teams = read_reviewed_rosters(release)
+        else:
+            layout = subprocess.run(['pdftotext', '-layout', '-', '-'], input=raw, check=True, capture_output=True).stdout.decode()
+            teams = parse_rosters(layout, release)
         publications.append((release.source_url, release.sha256, release.available_at, 'dated_nba_roster_release'))
         for team, players in teams.items():
             for name, status in players:

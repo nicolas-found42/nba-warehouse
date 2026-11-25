@@ -314,13 +314,18 @@ access restrictions establish only that the requested route could not be checked
   event pin in the original crosswalk. Twelve additional Golden State–Lakers snapshots repeat a confirmed 50-quote payload
   exactly. Three Houston–Oklahoma City snapshots with a changed payload await an independent fixture citation.
   [NBA opening schedule](https://pr.nba.com/2025-26-nba-regular-season-schedule)
-- Five repeated matchups have distinct historical spread or total lines for the two possible dates and a separate Pinnacle
-  event already matched to the alternate fixture. The review applies to the five exact original snapshot keys.
+- Twelve repeated matchups have distinct historical spread or total lines for the two possible dates and a separate
+  Pinnacle event already matched to the alternate fixture. The main-line review applies to the exact original snapshot
+  keys. Three additional detailed snapshots repeat all 18 quotes of the reviewed Golden State–San Antonio or
+  Washington–Atlanta fixture. The 41 main lines and 6,732 detailed prices with a same-side disagreement and only a
+  provisional time-window link remain in `betting.pinnacle_match_review`, with both candidates recorded.
   [Cleveland–Miami, November 10](https://www.fanduel.com/research/nba-predictions-odds-11-10-2025)
   [Chicago–Atlanta, December 21](https://www.fanduel.com/research/nba-predictions-odds-12-21-2025)
   [Minnesota–Memphis, January 31](https://www.fanduel.com/research/nba-predictions-odds-1-31-2026)
   [Detroit–Washington, March 17](https://www.fanduel.com/research/nba-predictions-odds-3-17-2026)
   [Miami–Cleveland, March 25](https://www.fanduel.com/research/nba-predictions-odds-3-25-2026)
+  [Golden State–San Antonio, November 12](https://www.fanduel.com/research/nba-predictions-odds-11-12-2025)
+  [Washington–Atlanta, February 24](https://www.fanduel.com/research/nba-predictions-odds-2-24-2026)
   [Stars–Stripes contemporaneous preview](https://www.si.com/betting/usa-stars-vs-usa-stripes-odds-spread-total-and-prediction-for-2026-nba-all-star-game)
 
 - Billmill serves copies of the original NBA PDFs, including the first 2018 report and samples through the
@@ -354,14 +359,35 @@ access restrictions establish only that the requested route could not be checked
   schedule. [Roster schema](https://github.com/llimllib/nba_data/blob/d3941f7b3105973ef77bf21409eb6bd9c2b65903/docs/DATA_DICTIONARY.md#L656-L675)
   [Raw NBA roster capture](https://basketball-data.billmill.org/nba/raw/stats/2027/team_rosters/2026-11-24.json.gz)
   [NBA movement feed](https://stats.nba.com/js/data/playermovement/NBA_Player_Movement.json)
-- The August 14, 2025 NBA schedule lists 1,200 initial 2025–26 games. The warehouse linked 1,191 by exact date
-  and designated teams, audited the other nine, and uses the end of the published day as a conservative availability
-  bound. The original release supplies the fixture until a later official schedule capture supersedes it. Injury and roster
-  observations must also predate the recorded tip of completed games when that tip is earlier than the schedule release.
-  [NBA schedule release](https://pr.nba.com/2025-26-nba-regular-season-schedule)
+- The NBA opening-night roster PDFs for 2019–20 through 2023–24 each list all 30 teams. The warehouse uses the first
+  corroborated publication time for each pinned edition and preserves unlinked names and printed roster statuses in
+  `audit.nba_roster_release_name`. The July 2020 restart and October 2018 opening rosters are also available.
+  [2019 original roster PDF](https://ak-static.cms.nba.com/wp-content/uploads/sites/46/2019/10/2019-20-Regular-Season-Rosters.pdf)
+  [2020 release](https://pr.nba.com/rosters-set-for-2020-21-nba-regular-season/)
+  [2021 original roster PDF](https://s3.amazonaws.com/ukathletics.com/documents/2021/10/19/2021_22_Opening_Day_Rosters_10_18_21.pdf)
+  [2022 release](https://pr.nba.com/rosters-set-for-2022-23-nba-regular-season/)
+  [2023 PDF publication](https://thisistucson.com/nba-opening-rosters-2023-24/pdf_b52fd976-71ff-11ee-8fbf-d7479459d4aa.html)
+- The NBA’s original 2021–22 through 2025–26 by-date schedules and its 2020–21 second-half release link by
+  exact date and designated teams. The 2021–22 release marks 19 games as pending a tip time. The 2020–21 second-half
+  release marks 21. Their times remain unknown in the as-of fixture view until a later dated schedule supplies them.
+  The end of the NBA’s published day bounds the 2022 and 2025 releases. Injury and roster
+  observations must also predate the recorded tip when a completed game started earlier than originally scheduled.
+  [2021 schedule release](https://pr.nba.com/2021-22-nba-schedule-75th-anniversary-season/)
+  [2020–21 second-half schedule release](https://pr.nba.com/2020-21-nba-second-half-schedule/)
+  [2022 original schedule](https://pr.nba.com/wp-content/uploads/sites/46/2022/08/2022-23-NBA-Schedule-By-Date-8-17-22.pdf)
+  [2023 schedule release](https://pr.nba.com/2023-24-nba-regular-season-schedule/)
+  [2024 schedule release](https://pr.nba.com/2024-25-nba-regular-season-schedule)
+  [2025 schedule release](https://pr.nba.com/2025-26-nba-regular-season-schedule)
+- Cleveland at Milwaukee on March 9, 2025 has two different tips in the original August 15 schedule package.
+  The by-date PDF lists 7 p.m. Eastern and both team schedules list 8 p.m. Eastern. The as-of fixture keeps
+  the dated matchup with an unknown tip. `audit.nba_initial_schedule_tip_conflict` retains both values and the source PDFs.
+  [NBA schedule by date](https://ak-static.cms.nba.com/wp-content/uploads/sites/46/2024/08/2024-25-NBA-Regular-Season-Schedule-By-Date.pdf)
+  [NBA schedules by team](https://pr.nba.com/wp-content/uploads/sites/46/2024/08/2024-25-NBA-Regular-Season-Schedule-By-Team.pdf)
 - The original Pinnacle source dictionary does not specify timezone or quote publication time. Its dashboard groups the
   field as first and last seen. `betting.pinnacle_match_review` retains ambiguous links, unmatched rows and disagreements
   with the publisher crosswalk. Timestamped Kaggle feeds can enter the pregame views only for verified fixture links and
-  reported times strictly before tip-off, including when the publisher labels a quote as a close.
+  reported times strictly before tip-off, including when the publisher labels a quote as a close. Six sampled exact event
+  URLs served identical page shells without fixture metadata. Exact Wayback searches for those events yielded no captures.
   [Publisher dictionary](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/csv/nba/data_dictionary.csv#L364-L401)
   [Publisher dashboard](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/projects/db-viz/pages/09_Odds_and_Betting.py#L61-L98)
+  [Sample Pinnacle event](https://www.pinnacle.com/en/basketball/nba/usa-stars-vs-usa-stripes/1624285681/)

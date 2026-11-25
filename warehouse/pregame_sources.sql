@@ -44,7 +44,7 @@ WITH latest AS (
     FROM raw.nba_roster_capture r JOIN raw.nba_roster_publication p USING (source_url, sha256)
     JOIN core.pregame_fixture_at(fixture, known_at) g ON r.team_id IN (g.home_team_id, g.away_team_id)
     LEFT JOIN core.dim_game completed ON completed.game_id = g.game_id AND completed.result_status = 'final'
-    WHERE g.game_id = fixture AND p.available_at <= known_at
+    WHERE g.game_id = fixture AND g.tipoff_at IS NOT NULL AND p.available_at <= known_at
       AND p.available_at < least(g.tipoff_at, completed.game_datetime_est AT TIME ZONE 'America/New_York')
       AND r.source_date BETWEEN g.game_date - INTERVAL 7 DAY AND g.game_date
     QUALIFY p.available_at = max(p.available_at) OVER (PARTITION BY r.team_id)

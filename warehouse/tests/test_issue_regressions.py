@@ -133,6 +133,11 @@ def test_first_schedule_capture_remains_queryable_when_the_fixture_changes():
     for cutoff, expected in (('11:00', []), ('15:00', [(19,)]), ('17:00', [(21,)])):
         assert c.execute("SELECT hour(tipoff_at AT TIME ZONE 'America/New_York') FROM core.pregame_fixture_at('0022600001',?::TIMESTAMPTZ)",
                          [f'2026-11-24 {cutoff}:00-05']).fetchall() == expected
+    c.execute('''INSERT INTO raw.nba_initial_schedule VALUES
+        ('0022600002','2026-11-24',NULL,1,2,'initial','2026-08-15 00:00:00-04','initial');
+        INSERT INTO core.dim_game VALUES ('0022600002','2026-11-24',1,2,'2026-11-24 19:00:00','resolved','final');''')
+    assert c.execute("SELECT fixture_source,tipoff_at FROM core.pregame_fixture_at('0022600002',TIMESTAMPTZ '2026-11-24 17:00:00-05')").fetchall() == [
+        ('nba_initial_schedule_release', None)]
 
 
 def test_roster_cutoff_uses_published_time_after_capture_start():

@@ -9,6 +9,7 @@ Sources (all from the raw layer, unchanged there):
 Matching for the time-keyed sources is redone here independently: the game must involve exactly
 those two franchises and agree on preseason status. For multiple candidates, a unique away-home order
 resolves the fixture under the ordering observed in the Pinnacle exports. Otherwise the row stays ambiguous.
+A disagreement between same-side fixtures stays ambiguous when the only local evidence is the time window.
 The source pipeline's crosswalk and full candidate list remain available for review.
 
   uv run --no-project --with duckdb==2.0.0 python warehouse/betting.py [--output data/nba-warehouse.duckdb]
@@ -117,7 +118,18 @@ SELECT * FROM (VALUES
     ('1621316242',TIMESTAMP '2025-12-21 19:32:45','Chicago Bulls vs Atlanta Hawks','0022500396',1610612741,1610612737),
     ('1622988890',TIMESTAMP '2026-01-31 23:20:13','Minnesota Timberwolves vs Memphis Grizzlies','0022500700',1610612750,1610612763),
     ('1626305622',TIMESTAMP '2026-03-17 20:33:35','Detroit Pistons vs Washington Wizards','0022500993',1610612765,1610612764),
-    ('1626840278',TIMESTAMP '2026-03-25 19:44:31','Miami Heat vs Cleveland Cavaliers','0022501055',1610612748,1610612739)
+    ('1626840278',TIMESTAMP '2026-03-25 19:44:31','Miami Heat vs Cleveland Cavaliers','0022501055',1610612748,1610612739),
+    ('1619136212',TIMESTAMP '2025-11-12 21:45:14','Golden State Warriors vs San Antonio Spurs','0022500220',1610612744,1610612759),
+    ('1621763755',TIMESTAMP '2026-01-03 22:07:11','Atlanta Hawks vs Toronto Raptors','0022500488',1610612737,1610612761),
+    ('1624093946',TIMESTAMP '2026-02-19 21:06:50','Indiana Pacers vs Washington Wizards','0022500795',1610612754,1610612764),
+    ('1624393217',TIMESTAMP '2026-02-24 17:32:06','Washington Wizards vs Atlanta Hawks','0022500832',1610612764,1610612737),
+    ('1625968540',TIMESTAMP '2026-03-18 19:06:20','Los Angeles Clippers vs New Orleans Pelicans','0022501005',1610612746,1610612740),
+    ('1629014729',TIMESTAMP '2026-04-24 18:31:35','San Antonio Spurs vs Portland Trail Blazers','0042500153',1610612759,1610612757),
+    ('1629019804',TIMESTAMP '2026-04-24 18:31:35','Los Angeles Lakers vs Houston Rockets','0042500173',1610612747,1610612745),
+    -- Detailed-only keys repeat the complete payload of the reviewed November 12 and February 24 anchors above.
+    (NULL,TIMESTAMP '2025-11-12 21:57:33','Golden State Warriors vs San Antonio Spurs','0022500220',1610612744,1610612759),
+    (NULL,TIMESTAMP '2025-11-12 22:03:49','Golden State Warriors vs San Antonio Spurs','0022500220',1610612744,1610612759),
+    (NULL,TIMESTAMP '2026-02-24 18:17:56','Washington Wizards vs Atlanta Hawks','0022500832',1610612764,1610612737)
 ) AS reviewed(event_id,snapshot_ts,matchup,game_id,away_id,home_id);
 
 CREATE OR REPLACE TEMP TABLE cand AS
@@ -128,7 +140,8 @@ FROM keyed_team k LEFT JOIN reviewed_pinnacle_fixture m
   ON k.source='main_line' AND regexp_extract(rtrim(k.source_key,'/'), '/([0-9]+)$', 1)=m.event_id
  AND k.snapshot_ts::DATE=m.quote_day
 LEFT JOIN reviewed_pinnacle_detail d ON k.source='market_odds' AND d.matchup=k.source_key AND d.snapshot_ts=k.snapshot_ts
-LEFT JOIN reviewed_pinnacle_key r ON k.snapshot_ts=r.snapshot_ts AND k.team1_id=r.away_id AND k.team2_id=r.home_id
+LEFT JOIN reviewed_pinnacle_key r ON k.snapshot_ts=r.snapshot_ts AND k.is_preseason=false
+ AND k.team1_id=r.away_id AND k.team2_id=r.home_id
  AND ((k.source='main_line' AND regexp_extract(rtrim(k.source_key,'/'), '/([0-9]+)$', 1)=r.event_id)
       OR (k.source='market_odds' AND k.source_key=r.matchup))
 JOIN game_slot s
@@ -155,29 +168,46 @@ FROM keyed_team k LEFT JOIN cand c ON c.source = k.source AND c.source_key IS NO
     AND c.n2 IS NOT DISTINCT FROM k.n2 AND c.is_preseason IS NOT DISTINCT FROM k.is_preseason
 GROUP BY k.source, k.source_key, k.snapshot_ts, k.n1, k.n2, k.is_preseason, k.team1_id, k.team2_id;
 
+-- A sole local time-window candidate cannot settle a same-side disagreement while the source clock is unknown.
+CREATE OR REPLACE TEMP MACRO source_fixture_conflicts(method, selected_game, source_game, team1, team2, source_away, source_home) AS (
+    method='sole_time_window_candidate' AND selected_game<>source_game AND team1=source_away AND team2=source_home
+);
+
 CREATE OR REPLACE TABLE betting.main_line AS
-SELECT m.*, o.team1_id AS matched_team1_id, o.team2_id AS matched_team2_id, o.match_status, o.game_id, o.candidate_game_ids,
+SELECT m.*, o.team1_id AS matched_team1_id, o.team2_id AS matched_team2_id,
+       CASE WHEN conflict.hold THEN 'ambiguous' ELSE o.match_status END AS match_status,
+       CASE WHEN conflict.hold THEN NULL ELSE o.game_id END AS game_id,
+       CASE WHEN conflict.hold THEN list_append(o.candidate_game_ids,b.game_id) ELSE o.candidate_game_ids END AS candidate_game_ids,
        b.game_id AS source_game_id, b.match_method AS source_match_method,
        (b.game_id IS NOT NULL AND o.game_id IS NOT NULL AND b.game_id <> o.game_id) AS disagrees_with_source,
-       o.fixture_link_method
+       CASE WHEN conflict.hold THEN 'unresolved_same_side_conflict' ELSE o.fixture_link_method END AS fixture_link_method
 FROM raw.fact_game_main_line m JOIN our_match o ON o.source = 'main_line' AND o.source_key IS NOT DISTINCT FROM m.game_link
      AND o.snapshot_ts IS NOT DISTINCT FROM m.snapshot_ts AND o.n1 IS NOT DISTINCT FROM lower(trim(m.team1_name))
      AND o.n2 IS NOT DISTINCT FROM lower(trim(m.team2_name)) AND o.is_preseason IS NOT DISTINCT FROM m.is_preseason
 LEFT JOIN (SELECT game_link, CASE WHEN count(DISTINCT game_id) = 1 THEN any_value(game_id) END AS game_id,
                   string_agg(DISTINCT match_method, ',') AS match_method
-           FROM raw.bridge_game_main_line GROUP BY 1) b USING (game_link);
+           FROM raw.bridge_game_main_line GROUP BY 1) b USING (game_link)
+LEFT JOIN game_slot original ON original.game_id=b.game_id,
+LATERAL (SELECT source_fixture_conflicts(o.fixture_link_method,o.game_id,b.game_id,o.team1_id,o.team2_id,
+                                         original.away_team_id,original.home_team_id) AS hold) conflict;
 
 CREATE OR REPLACE TABLE betting.market_odds AS
-SELECT m.*, o.team1_id, o.team2_id, o.match_status, o.game_id, o.candidate_game_ids,
+SELECT m.*, o.team1_id, o.team2_id,
+       CASE WHEN conflict.hold THEN 'ambiguous' ELSE o.match_status END AS match_status,
+       CASE WHEN conflict.hold THEN NULL ELSE o.game_id END AS game_id,
+       CASE WHEN conflict.hold THEN list_append(o.candidate_game_ids,b.game_id) ELSE o.candidate_game_ids END AS candidate_game_ids,
        b.game_id AS source_game_id, b.match_method AS source_match_method,
        (b.game_id IS NOT NULL AND o.game_id IS NOT NULL AND b.game_id <> o.game_id) AS disagrees_with_source,
-       o.fixture_link_method
+       CASE WHEN conflict.hold THEN 'unresolved_same_side_conflict' ELSE o.fixture_link_method END AS fixture_link_method
 FROM raw.fact_game_market_odds m JOIN our_match o ON o.source = 'market_odds' AND o.source_key IS NOT DISTINCT FROM m.matchup
      AND o.snapshot_ts IS NOT DISTINCT FROM m.snapshot_ts AND o.is_preseason IS NOT DISTINCT FROM m.is_preseason
 LEFT JOIN (SELECT matchup, snapshot_ts, CASE WHEN count(DISTINCT game_id) = 1 THEN any_value(game_id) END AS game_id,
                   string_agg(DISTINCT match_method, ',') AS match_method
            FROM raw.bridge_game_market_odds GROUP BY 1, 2) b
-  ON b.matchup = m.matchup AND b.snapshot_ts = m.snapshot_ts;
+  ON b.matchup = m.matchup AND b.snapshot_ts = m.snapshot_ts
+LEFT JOIN game_slot original ON original.game_id=b.game_id,
+LATERAL (SELECT source_fixture_conflicts(o.fixture_link_method,o.game_id,b.game_id,o.team1_id,o.team2_id,
+                                         original.away_team_id,original.home_team_id) AS hold) conflict;
 
 CREATE OR REPLACE TABLE betting.match_summary AS
 SELECT 'odds_snapshot' AS source, match_status, count(*) AS rows, count(DISTINCT game_id) AS games FROM betting.odds_snapshot GROUP BY ALL

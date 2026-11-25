@@ -191,6 +191,9 @@ def read_pdf(path: Path) -> tuple[str, dt.datetime, list[ReportRow]]:
         stamp, rows = parse_report(layout)
     except ETxml.ParseError as e:
         raise ValueError(f'invalid PDF layout for {path.name}') from e
+    match = REPORT_FILE.fullmatch(path.name)
+    if match and stamp.date() != dt.date.fromisoformat(match[1]):
+        raise ValueError(f'printed report date {stamp.date()} disagrees with the filename')
     return hashlib.sha256(raw).hexdigest(), stamp, rows
 
 
@@ -335,12 +338,9 @@ def replay_cached_pdfs(warehouse: Path, start: dt.date, end: dt.date) -> bool:
     held = total = 0
     for (year, month), batch in groupby(sorted(dates), key=lambda item: (item[0].year, item[0].month)):
         reports = {}
-        for day, path in batch:
+        for _, path in batch:
             try:
-                document = read_pdf(path)
-                if document[1].date() != day:
-                    raise ValueError(f'printed report date {document[1].date()} disagrees with the filename')
-                reports[path] = document
+                reports[path] = read_pdf(path)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 held += 1
                 print(f'Held cached injury report {retrieval_url(path)}: {exc}', flush=True)
@@ -450,15 +450,21 @@ def main() -> None:
                 AND game_date BETWEEN ? AND ?''', [args.from_date, args.through or now.date()]).fetchall()
         # Reports also include the following day's games.
         days = {day for (game_day,) in dates for day in (game_day, game_day - dt.timedelta(days=1)) if day >= args.from_date}
-        total = 0
+        total = held = 0
         for (year, month), batch in groupby(sorted(days), key=lambda day: (day.year, day.month)):
-            reports = {path: read_pdf(path) for path in capture_days(batch, now, workers=3)}
+            reports = {}
+            for path in capture_days(batch, now, workers=3):
+                try:
+                    reports[path] = read_pdf(path)
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    held += 1
+                    print(f'Held direct injury report {retrieval_url(path)}: {exc}', flush=True)
             with warehouse_lock(), connect(args.warehouse) as c:
                 publish(c, reports)
             total += len(reports)
             print(f'Published {len(reports)} injury reports for {year}-{month:02}', flush=True)
-        print(f'Published {total} NBA injury reports in the requested range', flush=True)
-        return
+        print(f'Published {total} NBA injury reports in the requested range. {held} require another check.', flush=True)
+        raise SystemExit(1 if held else 0)
     with warehouse_lock(), connect(args.warehouse) as c:
         publish(c, reports, mirrors, pregame)
     print(f'Published source data from {len(reports)} NBA PDFs and {len(mirrors)} season files', flush=True)
