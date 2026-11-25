@@ -106,6 +106,7 @@ def finalize(warehouse: Path) -> None:
             getattr(pns, part)(c)
         import load_nba_gaps, promote_domains as pd
         load_nba_gaps.starters(c)
+        load_nba_gaps.llimllib_starters(c)
         load_nba_gaps.pbp(c)
         for d in pd.DOMAINS:
             if d.name in ('fact_starting_lineup', 'dim_official', 'fact_game_official'):

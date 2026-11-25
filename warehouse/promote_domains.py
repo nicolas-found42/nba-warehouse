@@ -150,13 +150,19 @@ DOMAINS: list[Domain] = [
               SELECT game_id, team_id, person_id, starting_position, 'nba_boxscore_v3' FROM raw.nba_gap_starter
               WHERE game_id NOT IN (SELECT game_id FROM raw.fact_starting_lineup_player)
                 AND game_id NOT IN (SELECT game_id FROM core.fact_player_game_stats WHERE nullif(trim(starting_position), '') IS NOT NULL)
+              UNION ALL  -- llimllib/nba_data season files (NBA.com starter flag, no position) for games no source above covers
+              SELECT game_id, team_id, person_id, NULL, 'nba_llimllib' FROM raw.llimllib_starter
+              WHERE game_id NOT IN (SELECT game_id FROM raw.fact_starting_lineup_player)
+                AND game_id NOT IN (SELECT game_id FROM core.fact_player_game_stats WHERE nullif(trim(starting_position), '') IS NOT NULL)
+                AND game_id NOT IN (SELECT game_id FROM raw.nba_gap_starter GROUP BY 1 HAVING count(*) = 10)
               UNION ALL  -- Kaggle eoinamoore box scores (NBA.com-sourced) only for games no source above covers
               SELECT lpad(gameId, 10, '0'), try_cast(playerteamId AS BIGINT), try_cast(personId AS BIGINT), trim(startingPosition), 'kaggle_eoinamoore'
               FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__playerstatistics
               WHERE nullif(trim(startingPosition), '') IS NOT NULL
                 AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.fact_starting_lineup_player)
                 AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM core.fact_player_game_stats WHERE nullif(trim(starting_position), '') IS NOT NULL)
-                AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.nba_gap_starter)''',
+                AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.nba_gap_starter)
+                AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.llimllib_starter)''',
            key=['game_id', 'person_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'person_id': 'core.dim_person(person_id)',
                 '(game_id, team_id)': 'core.bridge_game_team(game_id, team_id)'},

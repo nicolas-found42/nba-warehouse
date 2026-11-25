@@ -58,6 +58,22 @@ def starters(c) -> None:
     print('starters', len(rows), 'games with 10:', sum(a[1] == 'admitted' for a in attempts), 'of', len(attempts))
 
 
+LLIMLLIB = CACHE.parent / 'llimllib' / 'player_game_status'
+
+
+def llimllib_starters(c) -> None:
+    """raw.llimllib_starter: starters (NBA.com boxscoretraditionalv3 starter flag) from llimllib/nba_data season files
+    (https://basketball-data.billmill.org/nba/stats/player_game_status/season=<YYYY>/data.parquet). No positions."""
+    files = sorted(LLIMLLIB.glob('*.parquet'))
+    if not files:
+        return
+    c.execute(f'''CREATE OR REPLACE TABLE raw.llimllib_starter AS
+        SELECT lpad(game_id, 10, '0') AS game_id, try_cast(team_id AS BIGINT) AS team_id, try_cast(player_id AS BIGINT) AS person_id
+        FROM read_parquet({[str(f) for f in files]}) WHERE starter
+        QUALIFY count(*) OVER (PARTITION BY game_id, team_id) = 5''')
+    print('llimllib starters', c.execute('SELECT count(*), count(DISTINCT game_id) FROM raw.llimllib_starter').fetchone())
+
+
 def pbp(c) -> None:
     have_ev = {r[0] for r in c.execute('SELECT DISTINCT game_id FROM core.fact_play_event').fetchall()}
     have_shot = {r[0] for r in c.execute('SELECT DISTINCT game_id FROM core.fact_shot').fetchall()}
@@ -72,10 +88,12 @@ def pbp(c) -> None:
         if g not in games:
             continue
         n_ev = n_sh = 0
+        seen: set[int] = set()
         for a in acts:
             s, per, an = secs(a.get('clock')), num(a.get('period')), num(a.get('actionNumber'))
-            if s is None or not per or per <= 0 or an is None or an < 0:
-                continue
+            if s is None or not per or per <= 0 or an is None or an < 0 or an in seen:
+                continue  # repeated action numbers: the first one is kept
+            seen.add(an)
             pid, tid = num(a.get('personId')) or None, num(a.get('teamId')) or None
             if pid and not tid:
                 tid = team_of.get((g, pid))
@@ -122,6 +140,7 @@ if __name__ == '__main__':
     with warehouse_lock():
         con = connect(DEFAULT_OUT)
         starters(con)
+        llimllib_starters(con)
         pbp(con)
         con.execute('CHECKPOINT')
         con.close()
