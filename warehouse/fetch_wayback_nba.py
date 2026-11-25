@@ -74,7 +74,7 @@ def get(url: str, path: Path) -> bytes:
 
 
 MARK = {'boxscore.html': rb'(gSGPlayerLink|Officials:|name_pl_)',
-        'manual_boxscore.html': rb'(gSGPlayerLink|Officials:|name_pl_|Score By Period|<t[dh][^>]*>\s*FGA)',
+        'manual_boxscore.html': rb'(gSGPlayerLink|Officials:|name_pl_|Score By Period|<t[dh][^>]*>\s*(?:FGA|FGM-A))',
         'playbyplay.html': rb'<tr\b[^>]*class=[\'\"]?pbpRow[OE]\b',
         'gameinfo.html': rb'nbaGIQtrPts(?:Last)?[\'\"]?\s*>\s*\d+'}
 

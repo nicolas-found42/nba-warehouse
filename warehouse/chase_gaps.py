@@ -123,10 +123,14 @@ def finalize(warehouse: Path) -> None:
         load_cska_box.create_starter_table(c)
         if load_cska_box.CACHE.is_file():
             load_cska_box.load(c)
+        from load_wayback_manual_box import load as load_manual_box
+        load_manual_box(c)
         from load_preseason_press import load as load_press
         load_press(c)
         from load_nbastats_history import publish_own_basket
         publish_own_basket(c)
+        from reconcile_historical_games import load as reconcile_historical
+        reconcile_historical(c)
         from load_usatoday_preseason import load as load_usatoday
         load_usatoday(c)
         load_nba_gaps.pbp_starters(c)

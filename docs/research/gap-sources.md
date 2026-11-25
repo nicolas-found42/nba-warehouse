@@ -147,6 +147,16 @@ access restrictions establish only that the requested route could not be checked
   [Toronto at Chicago](https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=241023004)
   [Dallas at Milwaukee](https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=241023015)
   [Golden State at Los Angeles](https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=251013013)
+- Three historical finals had corroborated errors. Detroit beat Cincinnati 100–83 on March 15, 1958. Golden State
+  beat the Clippers 82–78 on October 27, 2004. The Lakers beat Utah 95–85 on October 25, 2005. Their four
+  printed quarters reconcile to the corrected finals. Cincinnati and Golden State also have verified team boxes.
+  Utah’s missing Kris Humphries line accounts for all 14 omitted points. His playing time is unresolved. The
+  corrected Anaheim venue is recorded in the source receipt. The historical dimension still carries the old venue.
+  `audit.historical_fixture_correction` preserves the original fixture, result and boxes and lists the source URLs.
+  [Detroit Pistons account](https://www.nba.com/pistons/news/pistons-digest-sorting-out-rotations-back-end-on-pistons-to-do-list-with-a-month-to-go)
+  [Detroit box](https://www.basketball-reference.com/boxscores/195803150DET.html)
+  [Golden State box](https://sportsdata.usatoday.com/basketball/nba/stats/541929)
+  [Utah box](https://sportsdata.usatoday.com/basketball/nba/stats/661261)
 - The broadened Chronicling America query timed out on its first Washington game. The earlier per-game searches and
   Basketball-Reference or bulk checks remain in the ledger. Google News Archive supplied readable Pittsburgh issues.
   Brooklyn Newsstand points to its Newspapers.com partner. Exact-page checks on the New York and California archive
@@ -179,6 +189,19 @@ access restrictions establish only that the requested route could not be checked
   [October 7 box](https://old.cskabasket.ru/gm/?a=boxscore&id=332&lang=en)
   [Pashutin club profile](https://old.cskabasket.ru/team/?lang=en&player=1&season=55)
   [Contemporary roster](https://www.solobasket.com/internacional/euroliga-2006-2007-cska-moscow)
+- An NBA archive has the full October 5, 2006 Barcelona–Philadelphia manual box. Both teams’ player points and
+  minutes sum to their printed totals. Sport independently confirms both starting fives plus the 13 points for Andre
+  Iguodala and four for Mario Kasun. Their inconsistent shooting fields stay null. The separate Lyon archive
+  supplies San Antonio’s 115 points and 238 minutes of reported player time. Its ASVEL player attribution is
+  inconsistent, so the raw rows remain held in `audit.manual_box_player_receipt`.
+  [Barcelona manual box](https://web.archive.org/web/20070630213129id_/http://www.nba.com/games/20061005/PHIBAR/manual_boxscore.html)
+  [Sport match report](https://www.sport.es/es/noticias/baloncesto/barca-hizo-historia-costa-sixers-5529093)
+  [ASVEL manual box](https://web.archive.org/web/20061103004013id_/http://www.nba.com/games/20061005/SASLYV/manual_boxscore.html)
+  [Eurosport match report](https://www.eurosport.fr/basketball/nba/2006-2007/_sto979120/story.shtml)
+- USA TODAY’s October 28, 2005 box names Smush Parker as the Lakers player with five points, three assists and
+  24:26 of playing time. The Orange County Register confirms the identity and shooting line. The warehouse’s data
+  for that performance had been attributed to Adam Parada. [USA TODAY box](https://sportsdata.usatoday.com/basketball/nba/stats/661281)
+  [Orange County Register box](https://www.ocregister.com/2005/10/29/stars-starting-to-align/)
 - Twelve blank NBA.com player names were resolved from cached same-fixture NBA and ESPN stat lines or unique roster
   remainders. The NBA IDs are preserved. Nineteen still lack reproducible links, including DNP groups without names,
   jersey numbers or distinctive stats. The legacy Petteri Koponen profile appears in the index under the exact NBA ID.
@@ -191,6 +214,17 @@ access restrictions establish only that the requested route could not be checked
   [Contemporary scoring research](https://sports-reference.com/blog/2019/03/own-goals-added-to-nba-aba-box-scores)
 
 ### Pregame source limits
+
+- Billmill serves copies of the original NBA PDFs, including the first 2018 report and samples through the
+  2025–26 playoffs. Wayback CDX gives another list of official PDF URLs. The combined 2019–26 index contains
+  16,084 candidate filenames. Both indices are sampled and leave historical coverage incomplete. Original and
+  retrieval URLs and the byte digest are retained in `raw.nba_injury_report_retrieval`. The report’s printed
+  Eastern timestamp controls eligibility. The provider changed legacy filenames to quarter-hour suffixes at
+  9:00 a.m. Eastern on December 22, 2025.
+  [Billmill publisher workflow](https://github.com/llimllib/nba_data/blob/d3941f7b3105973ef77bf21409eb6bd9c2b65903/.github/workflows/injuries.yml#L93-L100)
+  [Example Wayback PDF index](https://web.archive.org/cdx/search/cdx?url=ak-static.cms.nba.com%2Freferee%2Finjury%2FInjury-Report_2025-12%2A&output=json&filter=statuscode%3A200&collapse=urlkey&fl=timestamp%2Coriginal%2Cstatuscode&limit=20)
+  [Final hourly filename example](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2025-12-22_08AM.pdf)
+  [First minute-qualified example](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2025-12-22_09_00AM.pdf)
 
 - The NBA PDF cache keeps printed timestamps, statuses and notices. The season mirror covers 2019–2027 and contains
   selected pregame snapshots. Strict pregame queries corroborate identities with the roster available at the cutoff.

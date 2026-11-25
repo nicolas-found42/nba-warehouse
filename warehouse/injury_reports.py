@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import hashlib
 import re
@@ -24,8 +25,10 @@ ET = ZoneInfo('America/New_York')
 CACHE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence' / 'injury-reports'
 NBA = 'https://ak-static.cms.nba.com/referee/injury/'
 MIRROR = 'https://basketball-data.billmill.org/nba/stats/injury_report/'
+MIRROR_PDF = 'https://basketball-data.billmill.org/nba/raw/stats/{season}/injury_report/'
 FIRST_DATE = dt.date(2018, 12, 17)
-QUARTER_HOUR = dt.date(2025, 12, 22)
+LEGACY_MINUTE_CHANGE = dt.datetime(2025, 12, 19, 16, tzinfo=ET)
+QUARTER_HOUR = dt.datetime(2025, 12, 22, 9, tzinfo=ET)
 STATUSES = {'Out', 'Doubtful', 'Questionable', 'Probable', 'Available'}
 TEAM_NOTES = {'NOT YET SUBMITTED', 'ALL PLAYERS AVAILABLE'}
 
@@ -121,21 +124,22 @@ def parse_report(document: bytes) -> tuple[dt.datetime, list[ReportRow]]:
     return published, rows
 
 
+def report_filename(stamp: dt.datetime) -> str:
+    suffix = stamp.strftime('%Y-%m-%d_%I_%M%p' if stamp >= QUARTER_HOUR else '%Y-%m-%d_%I%p')
+    return f'Injury-Report_{suffix}.pdf'
+
+
 def slots(day: dt.date):
     if day < FIRST_DATE:
         return
-    if day >= QUARTER_HOUR:
-        hours, minutes = range(24), (0, 15, 30, 45)
-    elif day >= dt.date(2021, 7, 1) or dt.date(2020, 7, 22) <= day <= dt.date(2020, 10, 15):
-        hours, minutes = range(24), (30,)
-    else:
-        hours, minutes = (13, 17, 20), (30,)
+    hours = range(24) if (day >= dt.date(2021, 7, 1) or dt.date(2020, 7, 22) <= day <= dt.date(2020, 10, 15)) else (13, 17, 20)
     for hour in hours:
+        start = dt.datetime.combine(day, dt.time(hour), ET)
+        minutes = (0, 15, 30, 45) if start >= QUARTER_HOUR else (45,) if start >= LEGACY_MINUTE_CHANGE else (30,)
         for minute in minutes:
-            stamp = dt.datetime.combine(day, dt.time(hour, minute), ET)
+            stamp = start.replace(minute=minute)
             if stamp >= dt.datetime(2018, 12, 17, 17, 30, tzinfo=ET):
-                suffix = stamp.strftime('%Y-%m-%d_%I_%M%p' if day >= QUARTER_HOUR else '%Y-%m-%d_%I%p')
-                yield stamp, f'Injury-Report_{suffix}.pdf'
+                yield stamp, report_filename(stamp)
 
 
 def download(url: str, dest: Path, recent: bool = False) -> None:
@@ -184,6 +188,14 @@ def read_pdf(path: Path) -> tuple[str, dt.datetime, list[ReportRow]]:
     return hashlib.sha256(raw).hexdigest(), stamp, rows
 
 
+def retrieval_url(path: Path) -> str:
+    if path.parent.parent == CACHE / 'pdf-mirror':
+        return MIRROR_PDF.format(season=int(path.parent.name)) + path.name
+    if path.parent.parent == CACHE / 'pdf-wayback':
+        return f'https://web.archive.org/web/{path.parent.name}id_/{NBA}{path.name}'
+    return NBA + path.name
+
+
 def publish(c, reports: dict, mirror: list[Path] | None = None, pregame=None) -> None:
     c.execute('BEGIN')
     try:
@@ -194,10 +206,17 @@ def publish(c, reports: dict, mirror: list[Path] | None = None, pregame=None) ->
         c.execute('''CREATE TABLE IF NOT EXISTS raw.nba_injury_report_mirror (
             season INTEGER, report_time TIMESTAMPTZ, game_id VARCHAR, game_date DATE, team_id VARCHAR,
             player_id VARCHAR, status VARCHAR, reason VARCHAR, detail VARCHAR, source_url VARCHAR)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS raw.nba_injury_report_retrieval (
+            source_url VARCHAR, sha256 VARCHAR, retrieval_url VARCHAR,
+            PRIMARY KEY (source_url, sha256, retrieval_url))''')
         for path, (digest, stamp, rows) in reports.items():
-            c.execute('DELETE FROM raw.nba_injury_report WHERE source_url = ? AND sha256 = ?', [NBA + path.name, digest])
-            c.executemany('INSERT INTO raw.nba_injury_report VALUES (?,?,?,?,?,?,?,?,?,?)',
-                          [(NBA + path.name, digest, i, stamp, *astuple(row)) for i, row in enumerate(rows, 1)])
+            source = NBA + path.name
+            c.execute('INSERT OR IGNORE INTO raw.nba_injury_report_retrieval VALUES (?,?,?)',
+                      [source, digest, retrieval_url(path)])
+            c.execute('DELETE FROM raw.nba_injury_report WHERE source_url = ? AND sha256 = ?', [source, digest])
+            if rows:
+                c.executemany('INSERT INTO raw.nba_injury_report VALUES (?,?,?,?,?,?,?,?,?,?)',
+                              [(source, digest, i, stamp, *astuple(row)) for i, row in enumerate(rows, 1)])
         for path in mirror or []:
             season = int(path.stem)
             c.execute('DELETE FROM raw.nba_injury_report_mirror WHERE season = ?', [season])
@@ -218,12 +237,104 @@ def capture_daily(now: dt.datetime) -> dict:
     return {path: read_pdf(path) for path in paths}
 
 
+def indexed_pdfs(warehouse: Path, start: dt.date, end: dt.date, cached_only: bool) -> bool:
+    with connect(warehouse, read_only=True) as c:
+        stamps = c.execute('''SELECT DISTINCT season, epoch(report_time) AS report_epoch FROM raw.nba_injury_report_mirror
+            WHERE timezone('America/New_York', report_time)::DATE BETWEEN ? AND ?
+            ORDER BY report_epoch DESC, season''', [start, end]).fetchall()
+    indexed = [(season, dt.datetime.fromtimestamp(stamp, ET)) for season, stamp in stamps]
+    imported = held = missing = 0
+    for (year, month), batch in groupby(indexed, key=lambda row: (row[1].year, row[1].month)):
+        reports = {}
+        for season, expected_at in batch:
+            name = report_filename(expected_at)
+            primary = CACHE / 'pdf' / name
+            mirrored = CACHE / 'pdf-mirror' / str(season) / name
+            path = primary if primary.is_file() else mirrored
+            try:
+                if not cached_only and path == mirrored:
+                    download(retrieval_url(path), path)
+                if not path.is_file():
+                    missing += 1
+                    continue
+                document = read_pdf(path)
+                if document[1] != expected_at:
+                    raise ValueError(f'expected {expected_at.isoformat()}, PDF prints {document[1].isoformat()}')
+                reports[path] = document
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                held += 1
+                print(f'Held indexed injury report {season}/{name}: {exc}', flush=True)
+        if reports:
+            with warehouse_lock(), connect(warehouse) as c:
+                publish(c, reports)
+            imported += len(reports)
+            print(f'Published {len(reports)} indexed injury PDFs for {year}-{month:02}', flush=True)
+    print(f'Published {imported} of {len(indexed)} indexed PDF snapshots. '
+          f'{held} errors or stamp mismatches. {missing} unavailable from the selected cache or route.', flush=True)
+    return held == 0 and (cached_only or missing == 0)
+
+
+def archive_pdfs(warehouse: Path, catalog: Path, start: dt.date, end: dt.date) -> bool:
+    entries = {}
+    with catalog.open(newline='') as source:
+        for row in csv.DictReader(source):
+            name = row['filename']
+            m = re.fullmatch(r'Injury-Report_(\d{4}-\d{2}-\d{2})_\d{2}(?:_\d{2})?[AP]M\.pdf', name)
+            if not m:
+                continue
+            day = dt.date.fromisoformat(m[1])
+            if start <= day <= end:
+                capture = row['wayback_captured_at_utc']
+                if capture and not re.fullmatch(r'\d{14}', capture):
+                    raise ValueError(f'invalid archive capture time for {name}')
+                entries[name] = (day, capture, int(row['ending_season']), bool(row.get('mirror_url')))
+    ordered = sorted(entries.items(), key=lambda item: (item[1][0], item[0]), reverse=True)
+    imported = failures = 0
+    for (year, week), batch in groupby(ordered, key=lambda entry: entry[1][0].isocalendar()[:2]):
+        reports = {}
+        for name, (_, capture, season, has_mirror) in batch:
+            primary = CACHE / 'pdf' / name
+            mirrored = CACHE / 'pdf-mirror' / str(season) / name
+            candidates = [primary]
+            if mirrored.is_file():
+                candidates.insert(int(primary.is_file()), mirrored)
+            elif has_mirror:
+                candidates.append(mirrored)
+            if capture:
+                candidates.append(CACHE / 'pdf-wayback' / capture / name)
+            errors = []
+            for path in candidates:
+                try:
+                    download(retrieval_url(path), path)
+                    if not path.is_file():
+                        continue
+                    document = read_pdf(path)
+                    if report_filename(document[1]) != name:
+                        raise ValueError(f'printed timestamp {document[1].isoformat()} disagrees with indexed filename')
+                    reports[path] = document
+                    break
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    errors.append(f'{retrieval_url(path)}: {exc}')
+            else:
+                failures += 1
+                print(f'Held archived injury report {name}: {". ".join(errors) or "no candidate URL yielded a PDF"}', flush=True)
+        if reports:
+            with warehouse_lock(), connect(warehouse) as c:
+                publish(c, reports)
+            imported += len(reports)
+            print(f'Published {len(reports)} original injury PDFs for ISO week {year}-{week:02}', flush=True)
+    print(f'Published {imported} of {len(entries)} catalogued injury PDFs; {failures} require another check', flush=True)
+    return failures == 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=['mirror', 'daily', 'backfill', 'cached', 'rosters'])
+    parser.add_argument('mode', choices=['mirror', 'daily', 'backfill', 'cached', 'rosters', 'indexed-pdfs', 'archive-pdfs'])
     parser.add_argument('--warehouse', type=Path, default=DEFAULT_OUT)
     parser.add_argument('--from-date', type=dt.date.fromisoformat, default=FIRST_DATE)
     parser.add_argument('--through', type=dt.date.fromisoformat)
+    parser.add_argument('--cached-only', action='store_true', help='indexed-pdfs: import downloaded files without fetching')
+    parser.add_argument('--index', type=Path, help='archive-pdfs: local official and Wayback PDF URL index')
     args = parser.parse_args()
     now = dt.datetime.now(ET)
     mirrors = []
@@ -244,9 +355,15 @@ def main() -> None:
     elif args.mode == 'rosters':
         reports = {}
         pregame = pregame_sources.capture(now, history=True)
+    elif args.mode == 'indexed-pdfs':
+        raise SystemExit(0 if indexed_pdfs(args.warehouse, args.from_date, args.through or now.date(), args.cached_only) else 1)
+    elif args.mode == 'archive-pdfs':
+        if args.index is None:
+            parser.error('archive-pdfs requires --index')
+        raise SystemExit(0 if archive_pdfs(args.warehouse, args.index, args.from_date, args.through or now.date()) else 1)
     elif args.mode == 'backfill':
         with connect(args.warehouse, read_only=True) as c:
-            dates = c.execute('''SELECT DISTINCT game_date FROM core.dim_game WHERE season_type IN ('Regular','Playoffs')
+            dates = c.execute('''SELECT DISTINCT game_date FROM core.dim_game WHERE season_type IN ('Regular','Playoffs','PlayIn','Cup')
                 AND game_date BETWEEN ? AND ?''', [args.from_date, args.through or now.date()]).fetchall()
         # Reports also include the following day's games.
         days = {day for (game_day,) in dates for day in (game_day, game_day - dt.timedelta(days=1)) if day >= args.from_date}

@@ -123,10 +123,13 @@ so their prices remain visible in `betting.price_pair` and are withheld from the
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py mirror
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py rosters
 uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py backfill --from-date 2018-12-17 --through 2019-06-14
+uv run --no-project --with duckdb==2.0.0 python warehouse/injury_reports.py indexed-pdfs --from-date 2021-07-01 --through 2026-06-30
 uv run --no-project --with duckdb==2.0.0 python warehouse/betting.py
 ```
 
-Official PDF capture uses Poppler's `pdftotext`. Historical and daily source coverage is documented in the
+Official PDF capture uses Poppler's `pdftotext`. `indexed-pdfs` uses the downloaded seasonal mirror tables to
+find original PDF filenames. `archive-pdfs --index PATH` accepts a local official and Wayback PDF catalogue.
+Historical and daily source coverage is documented in the
 [research note](docs/research/gap-sources.md).
 
 ## History

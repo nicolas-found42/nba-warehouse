@@ -6,7 +6,7 @@ import pytest
 
 from fetch_newspaper_periods import cumulative_periods
 from fetch_espn import fixture_key, fixture_matches
-from injury_reports import ET, ReportRow, parse_report, publish
+from injury_reports import ET, ReportRow, parse_report, publish, slots
 from load_espn import names_by_stat_line
 
 
@@ -35,6 +35,16 @@ def test_injury_pdf_coordinates_survive_page_breaks_and_keep_team_notices():
     assert published == dt.datetime(2026, 11, 24, 18, tzinfo=ET)
     assert rows == [ReportRow(published.date(), 'DET@ORL', 'Detroit Pistons', 'Example, Player', 'Out', 'Injury'),
                     ReportRow(published.date(), 'DET@ORL', 'Orlando Magic', None, 'NOT YET SUBMITTED', '')]
+
+
+def test_injury_pdf_filename_transition_is_midday():
+    friday = {stamp.strftime('%H:%M'): name for stamp, name in slots(dt.date(2025, 12, 19))}
+    assert friday['15:30'] == 'Injury-Report_2025-12-19_03PM.pdf'
+    assert friday['16:45'] == 'Injury-Report_2025-12-19_04PM.pdf'
+    monday = {stamp.strftime('%H:%M'): name for stamp, name in slots(dt.date(2025, 12, 22))}
+    assert monday['08:45'] == 'Injury-Report_2025-12-22_08AM.pdf'
+    assert monday['09:00'] == 'Injury-Report_2025-12-22_09_00AM.pdf'
+    assert monday['09:15'] == 'Injury-Report_2025-12-22_09_15AM.pdf'
 
 
 def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():
@@ -72,6 +82,28 @@ def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():
       (2027,'2026-11-24 18:30:00-05','0022600001','2026-11-24','1','11','Out','Fixture reason',NULL,'mirror')''')
     assert c.execute("SELECT source_player_id,person_id FROM core.injury_report_at('0022600001',TIMESTAMPTZ '2026-11-24 18:30:00-05') ORDER BY 1").fetchall() == [
         ('10', None), ('11', None)]
+    from injury_reports import CACHE
+
+    same_timestamp = dt.datetime(2026, 11, 24, 18, tzinfo=ET)
+    path = CACHE / 'pdf-mirror' / '2027' / '1.pdf'
+    publish(c, {path: ('mirror-version', same_timestamp, [ReportRow(day, 'DET@ORL', 'Detroit Pistons',
+                                                                  'Two, Player', 'Out', 'Mirror variation')])})
+    assert c.execute("SELECT status FROM core.injury_report_at('0022600001',TIMESTAMPTZ '2026-11-24 18:05:00-05')").fetchall() == [
+        ('Questionable',)]
+    assert c.execute("SELECT disposition FROM audit.injury_report_document WHERE sha256='mirror-version'").fetchone() == (
+        'lower_source_priority',)
+    c.execute('''INSERT INTO core.dim_team VALUES (5,'SAN','San Antonio Spurs'), (6,'PHI','Philadelphia 76ers');
+        INSERT INTO core.dim_game VALUES ('0022600002','2026-11-24',6,5,'2026-11-24 19:30','resolved');
+        INSERT INTO raw.nba_injury_report_mirror VALUES
+          (2027,'2026-11-24 18:00:00-05','0022600002','2026-11-24','5','21','Out','Unrelated game',NULL,'mirror');''')
+    assert c.execute("SELECT game_id,team_id,status FROM core.injury_report_snapshot WHERE game_id='0022600002'").fetchall() == [
+        ('0022600002', 5, 'Out')]
+    assert c.execute("SELECT team_id,status FROM core.injury_report_at('0022600002',TIMESTAMPTZ '2026-11-24 18:05:00-05')").fetchall() == [
+        (5, 'Out')]
+    publish(c, {Path('3.pdf'): ('sas-alias', dt.datetime(2026, 11, 24, 18, 15, tzinfo=ET), [
+        ReportRow(day, 'PHI@SAS', 'San Antonio Spurs', 'One, Player', 'Probable', 'Alias test')] )})
+    assert c.execute("SELECT team_id,status FROM core.injury_report_at('0022600002',TIMESTAMPTZ '2026-11-24 18:30:00-05')").fetchall() == [
+        (5, 'Probable')]
 
 
 def test_first_schedule_capture_remains_queryable_when_the_fixture_changes():
@@ -91,6 +123,18 @@ def test_first_schedule_capture_remains_queryable_when_the_fixture_changes():
     for cutoff, expected in (('11:00', []), ('15:00', [(19,)]), ('17:00', [(21,)])):
         assert c.execute("SELECT hour(tipoff_at AT TIME ZONE 'America/New_York') FROM core.pregame_fixture_at('0022600001',?::TIMESTAMPTZ)",
                          [f'2026-11-24 {cutoff}:00-05']).fetchall() == expected
+
+
+def test_manual_box_keeps_reported_points_when_shooting_is_inconsistent():
+    from load_wayback_manual_box import SCOREBOOKS, export_player, parse_table
+
+    values = ['<B>A.Iguodala</B>', '24:18', '3-5', '2-2', '1-2', '0', '4', '4', '5', '5', '0', '2', '0', '13']
+    table = '<tr>' + ''.join(f'<td>{value}</td>' for value in values) + '</tr>'
+    (player,) = parse_table(table)
+    assert player.starter_mark and player.seconds == 1458 and player.pts == 13
+    assert not player.shooting_reconciles()
+    row = export_player(SCOREBOOKS[0], player, 2738, 1610612755, 12304, False, False)
+    assert row[9] == 13 and row[14:20] == (None,) * 6
 
 
 def test_box_identity_requires_reciprocal_matches_and_the_full_stat_line(monkeypatch):
