@@ -101,13 +101,14 @@ def finalize(warehouse: Path) -> None:
         c = connect(warehouse)
         load_bref.boxscores(c)
         load_bref.gamelogs(c)
+        load_bref.officials(c)
         for part in ('identities', 'aba_boxes', 'views'):
             getattr(pns, part)(c)
         import load_nba_gaps, promote_domains as pd
         load_nba_gaps.starters(c)
         load_nba_gaps.pbp(c)
         for d in pd.DOMAINS:
-            if d.name == 'fact_starting_lineup':
+            if d.name in ('fact_starting_lineup', 'dim_official', 'fact_game_official'):
                 c.execute('DELETE FROM audit.domain_disposition WHERE domain = ?', [d.name])
                 c.execute('DELETE FROM audit.domain_held WHERE domain = ?', [d.name])
                 print(d.name, *pd.promote(c, d), sep='\t', flush=True)

@@ -36,11 +36,23 @@ def download(url: str) -> Path:
     return p
 
 
+KAGGLE_REFS = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'data' / 'kaggle' / 'kyleknowles1__nba-referee-assignments-2016-2025'
+
+
+def kaggle_referees(c) -> None:
+    """raw_kaggle.kyleknowles1_nba_referee_assignments: Kaggle kyleknowles1/nba-referee-assignments-2016-2025 (CC BY-NC-SA 4.0),
+    one row per game with up to four officials as NBA referee ids. Fetched with the Kaggle CLI into data/kaggle/."""
+    files = sorted(KAGGLE_REFS.glob('*.csv'))
+    if files:
+        c.execute(f"CREATE OR REPLACE TABLE raw_kaggle.kyleknowles1_nba_referee_assignments AS SELECT * FROM read_csv({[str(f) for f in files]}, all_varchar = true)")
+
+
 def main() -> None:
     off = [download(f'{BASE}/espn_nba_officials/officials_{y}.csv') for y in SEASONS]
     sch = [download(f'{BASE}/espn_nba_schedules/nba_schedule_{y}.csv') for y in SEASONS]
     with warehouse_lock():
         c = connect(DEFAULT_OUT)
+        kaggle_referees(c)
         c.execute(f'''CREATE OR REPLACE TEMP TABLE sm AS
             SELECT DISTINCT id AS espn_game_id, (try_cast(date AS TIMESTAMPTZ) AT TIME ZONE 'America/New_York')::DATE AS d,
                    try_cast(home_score AS INTEGER) AS hs, try_cast(away_score AS INTEGER) AS aws

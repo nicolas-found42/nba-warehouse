@@ -175,16 +175,22 @@ DOMAINS: list[Domain] = [
                 '(game_id, team_id)': 'core.bridge_game_team(game_id, team_id)'},
            not_null=['game_id', 'team_id', 'person_id', 'in_time_real']),
     Domain('dim_official', 'raw.dim_official + raw.officials (NBA referee ids) + ESPN-resolved officials',
-           '''SELECT official_id, any_value(first_name) AS first_name, any_value(last_name) AS last_name, any_value(jersey_num) AS jersey_num
+           '''SELECT official_id, arg_min(first_name, pref) AS first_name, arg_min(last_name, pref) AS last_name, arg_min(jersey_num, pref) AS jersey_num
               FROM (SELECT try_cast(official_id AS BIGINT) AS official_id, first_name, last_name, jersey_num, 1 AS pref FROM raw.dim_official
                     UNION ALL SELECT try_cast(official_id AS BIGINT), first_name, last_name, jersey_num, 1 FROM raw.officials
                     UNION ALL SELECT official_id, split_part(espn_official_full_name, ' ', 1),
                                      trim(substr(espn_official_full_name, length(split_part(espn_official_full_name, ' ', 1)) + 2)), NULL, 2
-                    FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL)
+                    FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL
+                    UNION ALL  -- referees named with NBA ids in the Kaggle kyleknowles1 assignments (2016-2026)
+                    SELECT try_cast(code AS BIGINT), split_part(name, ' ', 1), trim(substr(name, length(split_part(name, ' ', 1)) + 2)), jnum, 3
+                    FROM (SELECT unnest([official1, official2, official3, official4]) AS name, unnest([official1_code, official2_code, official3_code, official4_code]) AS code,
+                                 unnest([official1_JNum, official2_JNum, official3_JNum, official4_JNum]) AS jnum FROM raw_kaggle.kyleknowles1_nba_referee_assignments)
+                    WHERE nullif(trim(code), '') IS NOT NULL)
               GROUP BY 1 HAVING bool_or(pref = 1) OR true''',
            key=['official_id'], not_null=['official_id']),
     Domain('fact_game_official', 'raw.officials (NBA box-score officials, 1996-2023); ESPN-resolved officials, then Kaggle eoinamoore names, only for games NBA data lacks',
-           '''SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num, 'nba_box_summary' AS source FROM raw.officials
+           '''WITH base AS (
+SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num, 'nba_box_summary' AS source FROM raw.officials
               UNION ALL
               SELECT game_id, official_id, NULL, 'espn' FROM raw.bridge_official_espn
               WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL AND game_id IS NOT NULL
@@ -199,6 +205,17 @@ DOMAINS: list[Domain] = [
               WHERE g.game_id NOT IN (SELECT game_id FROM raw.officials)
                 AND g.game_id NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
                                       AND official_id IS NOT NULL AND game_id IS NOT NULL)
+              UNION ALL  -- Kaggle kyleknowles1 referee assignments 2016-2026 (NBA game and referee ids), only for games no source above has
+              SELECT DISTINCT lpad(k.game_id, 10, '0'), try_cast(k.code AS BIGINT), k.jnum, 'kaggle_kyleknowles1'
+              FROM (SELECT game_id, unnest([official1_code, official2_code, official3_code, official4_code]) AS code,
+                           unnest([official1_JNum, official2_JNum, official3_JNum, official4_JNum]) AS jnum
+                    FROM raw_kaggle.kyleknowles1_nba_referee_assignments) k
+              WHERE nullif(trim(k.code), '') IS NOT NULL
+                AND lpad(k.game_id, 10, '0') NOT IN (SELECT game_id FROM raw.officials)
+                AND lpad(k.game_id, 10, '0') NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
+                                                    AND official_id IS NOT NULL AND game_id IS NOT NULL)
+                AND lpad(k.game_id, 10, '0') NOT IN (SELECT lpad(gameId, 10, '0') FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__games
+                                                    WHERE nullif(trim(officials), '') IS NOT NULL)
               UNION ALL  -- ESPN 1996-2002 crews (sportsdataverse release, load_espn_officials.py), only for games no source above has
               SELECT DISTINCT e.game_id, o.official_id, o.jersey_num, 'espn_sdv'
               FROM raw.espn_sdv_game_official e
@@ -213,7 +230,23 @@ DOMAINS: list[Domain] = [
                 AND e.game_id NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
                                       AND official_id IS NOT NULL AND game_id IS NOT NULL)
                 AND e.game_id NOT IN (SELECT lpad(gameId, 10, '0') FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__games
-                                      WHERE nullif(trim(officials), '') IS NOT NULL)''',
+                                      WHERE nullif(trim(officials), '') IS NOT NULL)
+)
+              SELECT * FROM base
+              UNION ALL  -- Basketball-Reference box-page crews, only to complete games where the sources above name fewer than 3 officials
+              SELECT * FROM (              SELECT DISTINCT g.game_id, o.official_id, o.jersey_num, 'bref_box'
+              FROM raw.bref_box_official b
+              JOIN core.team_source_id t ON t.source_system = 'basketball_reference' AND t.league = 'NBA' AND t.source_key = substr(b.bref_game_key, 10)
+              JOIN core.dim_game g ON g.home_team_id = t.team_id AND strftime(g.game_date, '%Y%m%d') = substr(b.bref_game_key, 1, 8)
+                   AND t.season_end_year = CAST(substr(g.season_year, 1, 4) AS INTEGER) + 1
+              JOIN (SELECT name, any_value(official_id) AS official_id, any_value(jersey_num) AS jersey_num
+                    FROM (SELECT DISTINCT lower(first_name || ' ' || last_name) AS name, official_id, jersey_num FROM core.dim_official
+                          UNION SELECT DISTINCT lower(b.espn_official_full_name), b.official_id, d.jersey_num FROM raw.bridge_official_espn b
+                          JOIN core.dim_official d USING (official_id) WHERE NOT b.is_ambiguous AND NOT b.is_unresolved)
+                    GROUP BY 1 HAVING count(DISTINCT official_id) = 1) o ON o.name = lower(b.official_name)
+              WHERE g.season_type IN ('Regular', 'Playoffs')) bb
+              WHERE bb.game_id IN (SELECT game_id FROM base GROUP BY 1 HAVING count(DISTINCT official_id) < 3)
+                AND (bb.game_id, bb.official_id) NOT IN (SELECT game_id, official_id FROM base)''',
            key=['game_id', 'official_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'official_id': 'core.dim_official(official_id)'},
            not_null=['game_id', 'official_id']),

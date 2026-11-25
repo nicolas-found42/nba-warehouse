@@ -97,9 +97,29 @@ def aba_gamelogs() -> None:
             print(i, pid, year, flush=True)
 
 
+def partial_crews() -> None:
+    """Box pages for regular-season and playoff games where the warehouse has fewer than 3 officials (the page lists the crew)."""
+    import duckdb
+    from build_warehouse import DEFAULT_OUT
+    c = duckdb.connect(str(DEFAULT_OUT), read_only=True)
+    keys = [r[0] for r in c.execute('''
+        SELECT strftime(g.game_date, '%Y%m%d') || '0' || t.source_key
+        FROM (SELECT game_id FROM core.fact_game_official GROUP BY 1 HAVING count(*) < 3) o
+        JOIN core.dim_game g USING (game_id)
+        JOIN core.team_source_id t ON t.team_id = g.home_team_id AND t.source_system = 'basketball_reference' AND t.league = 'NBA'
+             AND t.season_end_year = CAST(substr(g.season_year, 1, 4) AS INTEGER) + 1
+        WHERE g.season_type IN ('Regular', 'Playoffs') ORDER BY 1''').fetchall()]
+    c.close()
+    print(len(keys), 'partial-crew box pages', flush=True)
+    for i, k in enumerate(keys):
+        get(f'/boxscores/{k}.html')
+        if i % 50 == 0:
+            print(i, k, flush=True)
+
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('jobs', nargs='+', choices=['transactions', 'aba_schedule', 'team_seasons', 'aba_boxscores', 'aba_gamelogs'])
+    ap.add_argument('jobs', nargs='+', choices=['transactions', 'aba_schedule', 'team_seasons', 'aba_boxscores', 'aba_gamelogs', 'partial_crews'])
     ap.add_argument('--from-year', type=int, default=1985)
     a = ap.parse_args()
     try:

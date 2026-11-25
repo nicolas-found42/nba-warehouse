@@ -189,6 +189,20 @@ def gamelogs(c: duckdb.DuckDBPyConnection) -> None:
     print('game-log rows', len(out))
 
 
+def officials(c: duckdb.DuckDBPyConnection) -> None:
+    """Officials named on cached box pages ("Officials:" line), one row per game page and referee."""
+    out = []
+    for f in sorted((CACHE / 'boxscores').glob('*.html')):
+        m = re.search(r'Officials:(.*?)</div>', f.read_text('utf-8', errors='replace'), re.S)
+        if m:
+            for i, (ref, name) in enumerate(re.findall(r"href=['\"]/referees/([a-z0-9]+)\.html['\"]>([^<]+)</a>", m.group(1)), 1):
+                out.append((f.stem, i, ref, htmllib.unescape(name).strip()))
+    c.execute('CREATE OR REPLACE TABLE raw.bref_box_official (bref_game_key VARCHAR, official_order INTEGER, bref_referee_id VARCHAR, official_name VARCHAR)')
+    if out:
+        c.executemany('INSERT INTO raw.bref_box_official VALUES (?,?,?,?)', out)
+    print('box officials', len(out))
+
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('parts', nargs='*', default=['transactions', 'schedules', 'boxscores'])
