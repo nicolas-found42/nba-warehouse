@@ -48,6 +48,23 @@ Final gap ledger (`audit.game_coverage`):
 
 No gap remains `missing_recoverable`.
 
+## Chasing to zero (owner goal, 2026-11-25)
+
+The owner set the goal "chase all db gaps until 0 remain". Sources added in this pass, each used only for games with gaps and each with its own admission rule:
+
+| Gap | Source | Rule | Loader |
+|---|---|---|---|
+| Quarter scores (preseason, 1960s) | NBA.com `boxscoresummaryv3` periods | Both teams' periods add up to the final; equal period counts; tied after regulation when there is overtime | `load_nba_gaps.periods` |
+| Quarter scores | ESPN header line scores | Same rule | `load_espn.load` |
+| Quarter scores 1946-66 | Library of Congress Chronicling America OCR (free, no key) | A "score by periods" passage naming both teams, adding up exactly to both finals. OCR is never corrected. | `fetch_newspaper_periods.py` |
+| Play-by-play, shots, starters, referees, quarters (2001-2010) | Archived NBA.com game pages via the Internet Archive Wayback Machine (`nba.com/games/<date>/<AWYHOM>/`) | The game id is read from the box page. Plays are admitted only when the running score ends at the final. Shots have no coordinates (`unavailable`). Starters are box rows with a position, 5 resolved per team. Referees are resolved by name, else by jersey number plus surname. | `fetch_wayback_nba.py`, `load_wayback_nba.py` |
+| Foreign-club player boxes | NBA.com `boxscoretraditionalv3` (no names published) | Players are added to `dim_person` with NBA.com ids when the team's player points add up to its final. Names come from an exact ESPN stat-line match; otherwise they are labelled "Unnamed player (NBA.com id ...)". | `load_nba_gaps.boxes`, `raw.nba_gap_person` |
+| Team box | Sum of the warehouse's own player rows | Summed points equal the final; a stat is summed only when every player reports it | `load_nba_gaps.team_from_players` |
+| Starters (1996-99) | Inferred from first-quarter NBA play-by-play | First appearance before any sub-in; exactly 5 per team | `load_nba_gaps.pbp_starters` |
+| All-Star referees 1997-2003 | English Wikipedia infobox (revision id kept) | Exactly 3 names, resolved through `OFFICIAL_NAME_CANON` | `load_wiki_officials.py` |
+
+Checked and not useful in this pass: NBA.com v2 endpoints (`playbyplayv2` errors, `boxscoretraditionalv2` has no starting positions or foreign-player names), Basketball-Reference All-Star pages (no referee line), and Basketball-Reference line scores for 1946-50 (blank or non-adding cells; completing them by subtraction would invent data).
+
 ## Checked and not useful
 
 - Basketball-Reference player game-log pages are disallowed by robots.txt. They were fetched on the owner's decision, at the site's limit of 20 per minute.

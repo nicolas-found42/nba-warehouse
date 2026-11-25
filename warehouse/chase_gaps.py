@@ -113,6 +113,12 @@ def finalize(warehouse: Path) -> None:
         load_nba_gaps.periods(c)
         load_nba_gaps.pbp_starters(c)
         load_nba_gaps.team_from_players(c)
+        import load_wayback_nba  # archived NBA.com pages (ranked above ESPN)
+        if (load_wayback_nba.CACHE / 'pages').exists():
+            load_wayback_nba.load(c, load_wayback_nba.build_index(c))
+        # promotion reads these even before the first archive load
+        c.execute('CREATE TABLE IF NOT EXISTS raw.wayback_game_official (game_id VARCHAR, official_name VARCHAR, official_order INTEGER, jersey_num VARCHAR, official_id BIGINT)')
+        c.execute('CREATE TABLE IF NOT EXISTS raw.wayback_starter (game_id VARCHAR, team_id BIGINT, person_id BIGINT)')
         import load_espn  # ESPN public API (owner-approved 2026-11-25), lowest rank, fills only games nothing else covers
         if (load_espn.CACHE / 'matches.json').exists():
             load_espn.load(c, json.loads((load_espn.CACHE / 'matches.json').read_text()))
