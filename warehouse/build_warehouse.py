@@ -48,12 +48,21 @@ def lit(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
-def connect(path: Path, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+def connect(path: Path, read_only: bool = False, wait_seconds: int = 600) -> duckdb.DuckDBPyConnection:
+    """Open the warehouse; if another process holds DuckDB's file lock (one writer at a time), wait and retry."""
+    import time
     tmp = DATA / '.duckdb_tmp'
     tmp.mkdir(exist_ok=True)
-    return duckdb.connect(str(path), read_only=read_only, config={
-        'threads': max(2, (os.cpu_count() or 4) - 4), 'memory_limit': '24GB',
-        'temp_directory': str(tmp), 'preserve_insertion_order': True})
+    deadline = time.time() + wait_seconds
+    while True:
+        try:
+            return duckdb.connect(str(path), read_only=read_only, config={
+                'threads': max(2, (os.cpu_count() or 4) - 4), 'memory_limit': '24GB',
+                'temp_directory': str(tmp), 'preserve_insertion_order': True})
+        except duckdb.IOException as e:
+            if 'lock' not in str(e).lower() or time.time() > deadline:
+                raise
+            time.sleep(5)
 
 
 from contextlib import contextmanager

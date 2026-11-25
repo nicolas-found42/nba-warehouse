@@ -217,21 +217,21 @@ def main() -> int:
     cutoff = a.cutoff or (now.date() - dt.timedelta(days=1))
     REPORTS.mkdir(parents=True, exist_ok=True)
     report = REPORTS / f'{now:%Y-%m-%dT%H%M}-cutoff-{cutoff}.txt'
-    c = duckdb.connect(str(a.warehouse), read_only=True)
+    c = connect(a.warehouse, read_only=True)
     done = c.execute(f'SELECT cutoff FROM audit."{PREFIX}scope"').fetchone()[0]
     c.close()
     if done >= cutoff and not a.force:
         print(f'already current through {done}')
         return 0
     try:
-        with tempfile.TemporaryDirectory(dir=ROOT / 'data', prefix='.refresh-') as w:
+        # hold the writers' lock for the whole run: export, rebuild, clone, swap (gap chasing waits)
+        with warehouse_lock(), tempfile.TemporaryDirectory(dir=ROOT / 'data', prefix='.refresh-') as w:
             work = Path(w)
             assets = capture(cutoff)
             hist, prior, prev = export_inputs(a.warehouse, work)
             snap = work / 'snapshot.duckdb'
             build_snapshot(assets, cutoff, hist, prior, prev, snap)
-            with warehouse_lock():  # no other writer may touch the file between clone and swap
-                result = merge(a.warehouse, snap, cutoff, dt.datetime.now(dt.timezone.utc), work)
+            result = merge(a.warehouse, snap, cutoff, dt.datetime.now(dt.timezone.utc), work)
         report.write_text(f'committed cutoff {cutoff}\n{json.dumps(result, indent=2)}\n')
         print(report.read_text())
         return 0
