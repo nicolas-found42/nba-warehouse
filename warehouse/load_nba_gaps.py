@@ -147,6 +147,116 @@ def officials(c) -> None:
     print('officials from NBA.com v3:', len(rows), 'rows,', sum(a[1] == 'admitted' for a in attempts), 'of', len(attempts), 'games')
 
 
+def periods(c) -> None:
+    """Quarter and overtime scores from cached boxscoresummaryv3 responses, for games with no period scores. Admitted only
+    when both teams report the same number of periods and each team's periods add up to its official final (games stopped
+    early, such as a 2-period preseason game, are admitted when they add up)."""
+    have = {r[0] for r in c.execute('SELECT DISTINCT game_id FROM core.fact_game_period_score').fetchall()}
+    final = {g: (h, a, ht, at) for g, h, a, ht, at in c.execute('''SELECT g.game_id, r.home_score, r.away_score, g.home_team_id, g.away_team_id
+        FROM core.dim_game g JOIN core.fact_game_result r USING (game_id)''').fetchall()}
+    rows, attempts = [], []
+    for f in sorted((CACHE / 'boxscoresummaryv3').glob('*.json')):
+        g = f.stem
+        if g not in final:
+            continue
+        b = json.loads(f.read_text()).get('boxScoreSummary') or {}
+        if g in have:  # already filled: record 'admitted' when the stored periods are exactly these
+            stored = sorted(c.execute('SELECT team_id, period_number, points FROM core.fact_game_period_score WHERE game_id = ?', [g]).fetchall())
+            mine = sorted((num((b.get(s_) or {}).get('teamId')), num(p.get('period')), num(p.get('score')))
+                          for s_ in ('homeTeam', 'awayTeam') for p in (b.get(s_) or {}).get('periods') or [])
+            if stored and stored == mine:
+                attempts.append((g, 'admitted', 'periods add up to the final'))
+            continue
+        hs, aws, ht, at = final[g]
+        lines = []
+        for side, tid, pts in (('homeTeam', ht, hs), ('awayTeam', at, aws)):
+            t = b.get(side) or {}
+            ps = sorted(((num(p.get('period')), num(p.get('score'))) for p in t.get('periods') or []), key=lambda x: x[0] or 0)
+            ps = [(n_, s) for n_, s in ps if n_ and s is not None]
+            lines.append((num(t.get('teamId')), tid, pts, ps))
+        ok = (all(l[0] == l[1] for l in lines) and len(lines[0][3]) == len(lines[1][3]) >= 1
+              and all(sum(s for _, s in l[3]) == l[2] for l in lines))
+        if ok:
+            rows += [(g, l[1], n_, s) for l in lines for n_, s in l[3]]
+        attempts.append((g, 'admitted' if ok else 'no_data' if not lines[0][3] else 'mismatch',
+                         'periods add up to the final' if ok else 'no periods' if not lines[0][3] else 'periods do not add up'))
+    if rows:
+        c.executemany('INSERT INTO core.fact_game_period_score VALUES (?,?,?,?)', rows)
+    log(c, 'period_scores', attempts)
+    print('quarter scores from NBA.com v3:', sum(a[1] == 'admitted' for a in attempts), 'of', len(attempts), 'games')
+
+
+def pbp_starters(c) -> None:
+    """raw.pbp_inferred_starter: starters derived from NBA play-by-play for lineup gaps ('SUB: In FOR Out' events carry the
+    outgoing player's id; the incoming surname is resolved within the team's box score). A player is a starter when his
+    first first-quarter appearance comes before he is ever substituted in. Admitted only when that gives exactly 5 players per team."""
+    c.execute('CREATE TABLE IF NOT EXISTS raw.pbp_inferred_starter (game_id VARCHAR, team_id BIGINT, person_id BIGINT)')
+    gaps = [r[0] for r in c.execute("""SELECT game_id FROM audit.game_coverage WHERE domain = 'starting_lineup'
+        AND status IN ('missing_recoverable', 'source_unavailable') AND game_id IN (SELECT game_id FROM core.fact_play_event)
+        UNION SELECT game_id FROM raw.pbp_inferred_starter""").fetchall()]  # earlier inferences are re-derived, not dropped
+    rows, attempts = [], []
+    for g in gaps:
+        roster: dict[int, dict[str, list[int]]] = {}
+        for t, p, name in c.execute("""SELECT s.team_id, s.person_id, d.display_name FROM core.fact_player_game_stats s
+                JOIN core.dim_person d USING (person_id) WHERE s.game_id = ?""", [g]).fetchall():
+            roster.setdefault(t, {}).setdefault(re.sub(r'[^a-z]', '', (name or '').split()[-1].lower()), []).append(p)
+        first: dict[tuple, str] = {}
+        # first quarter only: lineup changes between periods are not logged as substitutions
+        for an, kind_, desc, t, p in c.execute("""SELECT action_number, action_kind, description, team_id, person_id
+                FROM core.fact_play_event WHERE game_id = ? AND period = 1 ORDER BY seconds_remaining DESC, action_number""", [g]).fetchall():
+            m = re.match(r'SUB:\s*(.+?)\s+FOR\s+', desc or '') if kind_ == 'substitution' else None
+            if m and t in roster:
+                ids = roster[t].get(re.sub(r'[^a-z]', '', m.group(1).split()[-1].lower()), [])
+                if len(ids) == 1:
+                    first.setdefault((t, ids[0]), 'in')
+            if p and t in roster:
+                first.setdefault((t, p), 'start')
+        per = {}
+        for (t, p), how in first.items():
+            if how == 'start':
+                per.setdefault(t, []).append(p)
+        ok = len(per) == 2 and all(len(v) == 5 for v in per.values())
+        if ok:
+            rows += [(g, t, p) for t, ps in per.items() for p in ps]
+        attempts.append((g, 'admitted' if ok else 'no_data', 'inferred from play-by-play' if ok else
+                         'play-by-play does not give 5 starters per team'))
+    c.execute('CREATE OR REPLACE TABLE raw.pbp_inferred_starter (game_id VARCHAR, team_id BIGINT, person_id BIGINT)')
+    if rows:
+        c.executemany('INSERT INTO raw.pbp_inferred_starter VALUES (?,?,?)', rows)
+    c.execute("DELETE FROM audit.gap_attempt WHERE domain = 'starting_lineup' AND source = 'pbp_inferred'")
+    if attempts:
+        c.executemany("INSERT INTO audit.gap_attempt VALUES ('starting_lineup', ?, 'pbp_inferred', now(), ?, ?)", attempts)
+    print('starters inferred from play-by-play:', sum(a[1] == 'admitted' for a in attempts), 'of', len(attempts), 'games')
+
+
+def team_from_players(c) -> None:
+    """Team box totals summed from the warehouse's own player rows, for team-games with no team row. Admitted only when the
+    summed points equal the team's official final and every summed stat is reported for every player (else left null)."""
+    c.execute("""CREATE OR REPLACE TEMP TABLE tp AS
+        SELECT s.game_id, s.team_id, s.is_home, s.is_win, sum(s.points) AS pts, count(*) AS n,
+               CASE WHEN count(s.fgm) = count(*) THEN sum(s.fgm) END AS fgm, CASE WHEN count(s.fga) = count(*) THEN sum(s.fga) END AS fga,
+               CASE WHEN count(s.fg3m) = count(*) THEN sum(s.fg3m) END AS fg3m, CASE WHEN count(s.fg3a) = count(*) THEN sum(s.fg3a) END AS fg3a,
+               CASE WHEN count(s.ftm) = count(*) THEN sum(s.ftm) END AS ftm, CASE WHEN count(s.fta) = count(*) THEN sum(s.fta) END AS fta,
+               CASE WHEN count(s.oreb) = count(*) THEN sum(s.oreb) END AS oreb, CASE WHEN count(s.dreb) = count(*) THEN sum(s.dreb) END AS dreb,
+               CASE WHEN count(s.reb) = count(*) THEN sum(s.reb) END AS reb, CASE WHEN count(s.assists) = count(*) THEN sum(s.assists) END AS ast,
+               CASE WHEN count(s.turnovers) = count(*) THEN sum(s.turnovers) END AS tov, CASE WHEN count(s.steals) = count(*) THEN sum(s.steals) END AS stl,
+               CASE WHEN count(s.blocks) = count(*) THEN sum(s.blocks) END AS blk, CASE WHEN count(s.fouls_personal) = count(*) THEN sum(s.fouls_personal) END AS pf
+        FROM core.fact_player_game_stats s
+        WHERE s.game_id IN (SELECT game_id FROM audit.game_coverage WHERE domain = 'team_box' AND status <> 'present')
+          AND (s.game_id, s.team_id) NOT IN (SELECT game_id, team_id FROM core.fact_team_game_stats)
+        GROUP BY ALL""")
+    c.execute("""CREATE OR REPLACE TEMP TABLE tp_ok AS SELECT tp.* FROM tp JOIN core.dim_game g USING (game_id) JOIN core.fact_game_result r USING (game_id)
+        WHERE tp.pts = CASE WHEN tp.team_id = g.home_team_id THEN r.home_score ELSE r.away_score END
+          AND coalesce(tp.fgm, 0) <= coalesce(tp.fga, 99999) AND coalesce(tp.fg3m, 0) <= coalesce(tp.fg3a, 99999) AND coalesce(tp.ftm, 0) <= coalesce(tp.fta, 99999)""")
+    c.execute("""INSERT INTO core.fact_team_game_stats BY NAME SELECT game_id, team_id, is_home, is_win, pts, fgm, fga, fg3m, fg3a, ftm, fta,
+        oreb, dreb, reb, ast, tov, stl, blk, pf FROM tp_ok""")
+    c.execute("DELETE FROM audit.gap_attempt WHERE domain = 'team_box' AND source = 'player_box_sum' AND game_id IN (SELECT game_id FROM tp)")
+    c.execute("""INSERT INTO audit.gap_attempt SELECT DISTINCT 'team_box', game_id, 'player_box_sum', now(),
+        CASE WHEN (game_id, team_id) IN (SELECT game_id, team_id FROM tp_ok) THEN 'admitted' ELSE 'mismatch' END,
+        'team totals summed from player rows' FROM tp""")
+    print('team boxes summed from player rows:', c.execute('SELECT count(*) FROM tp_ok').fetchone()[0], 'of', c.execute('SELECT count(*) FROM tp').fetchone()[0])
+
+
 def mins(v) -> float | None:
     m = re.fullmatch(r'(\d+):(\d+)(?:\.\d+)?', (v or '').strip())
     return int(m.group(1)) + int(m.group(2)) / 60 if m else None
@@ -164,6 +274,33 @@ def boxes(c) -> None:
     have_t = set(c.execute('SELECT game_id, team_id FROM core.fact_team_game_stats').fetchall())
     have_p = set(c.execute('SELECT DISTINCT game_id, team_id FROM core.fact_player_game_stats').fetchall())
     persons = {r[0] for r in c.execute('SELECT person_id FROM core.dim_person').fetchall()}
+    # players of visiting foreign clubs carry NBA.com person ids but are not in core.dim_person: add them (with a
+    # provenance row in raw.nba_gap_person) when their team's player points add up to its official final
+    c.execute('CREATE TABLE IF NOT EXISTS raw.nba_gap_person (person_id BIGINT PRIMARY KEY, display_name VARCHAR, game_id VARCHAR, team_id BIGINT)')
+    new_people, espn_names = [], None
+    for dom, g in sorted(gaps):
+        f = CACHE / 'boxscoretraditionalv3' / f'{g}.json'
+        if dom != 'player_box' or not f.exists():
+            continue
+        b = json.loads(f.read_text()).get('boxScoreTraditional') or {}
+        for side in ('homeTeam', 'awayTeam'):
+            t = b.get(side) or {}
+            tid, players = num(t.get('teamId')), t.get('players') or []
+            if (g, tid) in teams and players and score.get((g, tid)) == sum((p.get('statistics') or {}).get('points') or 0 for p in players):
+                for p in players:
+                    pid = num(p.get('personId'))
+                    if pid and pid not in persons:
+                        if espn_names is None or espn_names[0] != (g, side):
+                            from load_espn import names_by_stat_line  # NBA.com publishes no names for these players
+                            espn_names = ((g, side), names_by_stat_line(g, side == 'homeTeam', players))
+                        name = (f"{(p.get('firstName') or '').strip()} {(p.get('familyName') or '').strip()}".strip()
+                                or espn_names[1].get(pid) or f'Unnamed player (NBA.com id {pid}, {t.get("teamTricode") or "visiting club"})')
+                        new_people.append((pid, name, g, tid))
+                        persons.add(pid)
+    if new_people:
+        c.executemany('INSERT INTO core.dim_person (person_id, display_name) VALUES (?, ?)', [(p, n) for p, n, _, _ in new_people])
+        c.executemany('INSERT OR IGNORE INTO raw.nba_gap_person VALUES (?,?,?,?)', new_people)
+    print('persons added from NBA.com boxes:', len(new_people))
     trows, prows, att = [], [], {'team_box': {}, 'player_box': {}}
     for dom, g in sorted(gaps):
         f = CACHE / 'boxscoretraditionalv3' / f'{g}.json'
@@ -214,8 +351,11 @@ def boxes(c) -> None:
 
 
 def log(c, domain: str, attempts: list[tuple]) -> None:
-    c.execute('DELETE FROM audit.gap_attempt WHERE domain = ? AND source = ?', [domain, SOURCE])
+    # replace only the games logged now, so earlier 'admitted' records survive runs that skip already-filled games
     if attempts:
+        c.execute('CREATE OR REPLACE TEMP TABLE relog (game_id VARCHAR)')
+        c.executemany('INSERT INTO relog VALUES (?)', [(a[0],) for a in attempts])
+        c.execute('DELETE FROM audit.gap_attempt WHERE domain = ? AND source = ? AND game_id IN (SELECT game_id FROM relog)', [domain, SOURCE])
         c.executemany('INSERT INTO audit.gap_attempt VALUES (?,?,?,now(),?,?)', [(domain, g, SOURCE, o, n) for g, o, n in attempts])
 
 
@@ -227,5 +367,7 @@ if __name__ == '__main__':
         pbp(con)
         boxes(con)
         officials(con)
+        periods(con)
+        pbp_starters(con)
         con.execute('CHECKPOINT')
         con.close()

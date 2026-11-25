@@ -55,6 +55,52 @@ def kind(t: str, shooting: bool) -> str:
     return re.sub(r'[^a-z0-9]+', '_', tl).strip('_') or 'unknown'
 
 
+def stat_key(points, fg, fg3, ft, reb, ast) -> tuple:
+    return tuple(str(x).strip() for x in (points, fg, fg3, ft, reb, ast))
+
+
+def espn_athletes(gid: str, home: bool) -> list[tuple[str, str, tuple, dict]]:
+    """(espn athlete id, name, stat key, stats by key) for one side of a matched game's ESPN box score."""
+    matches = json.loads((CACHE / 'matches.json').read_text()) if (CACHE / 'matches.json').exists() else {}
+    f = CACHE / 'summary' / f'{matches.get(gid)}.json'
+    if gid not in matches or not f.exists():
+        return []
+    d = json.loads(f.read_text())
+    want = 'home' if home else 'away'
+    ids = {x['team']['id'] for x in ((d.get('header') or {}).get('competitions') or [{}])[0].get('competitors') or [] if x.get('homeAway') == want}
+    out = []
+    for t in (d.get('boxscore') or {}).get('players') or []:
+        if (t.get('team') or {}).get('id') not in ids:
+            continue
+        for st in t.get('statistics') or []:
+            keys = st.get('keys') or []
+            for a in st.get('athletes') or []:
+                v = dict(zip(keys, a.get('stats') or []))
+                if not v:
+                    continue
+                k = stat_key(v.get('points'), v.get('fieldGoalsMade-fieldGoalsAttempted'), v.get('threePointFieldGoalsMade-threePointFieldGoalsAttempted'),
+                             v.get('freeThrowsMade-freeThrowsAttempted'), v.get('rebounds'), v.get('assists'))
+                out.append(((a.get('athlete') or {}).get('id'), (a.get('athlete') or {}).get('displayName') or '', k, v))
+    return out
+
+
+def names_by_stat_line(gid: str, home: bool, players: list[dict]) -> dict[int, str]:
+    """NBA.com person id -> ESPN display name, for players whose full stat line matches exactly one ESPN athlete
+    on the same side (and that athlete matches exactly one NBA.com player)."""
+    esp = espn_athletes(gid, home)
+    nba = {}
+    for p in players:
+        s = p.get('statistics') or {}
+        k = stat_key(s.get('points'), f"{s.get('fieldGoalsMade')}-{s.get('fieldGoalsAttempted')}",
+                     f"{s.get('threePointersMade')}-{s.get('threePointersAttempted')}", f"{s.get('freeThrowsMade')}-{s.get('freeThrowsAttempted')}",
+                     s.get('reboundsTotal'), s.get('assists'))
+        nba.setdefault(k, []).append(p.get('personId'))
+    by = {}
+    for _, name, k, _ in esp:
+        by.setdefault(k, []).append(name)
+    return {ids[0]: by[k][0] for k, ids in nba.items() if len(ids) == 1 and len(by.get(k, [])) == 1 and by[k][0]}
+
+
 def main() -> None:
     matches = json.loads((CACHE / 'matches.json').read_text())
     with warehouse_lock():
@@ -167,9 +213,30 @@ def load(c, matches: dict) -> None:
     q = ','.join(f"'{x}'" for x in DOMAINS)
     for (gid,) in c.execute(f'''SELECT DISTINCT gc.game_id FROM audit.game_coverage gc JOIN core.dim_game g USING (game_id)
             WHERE gc.domain IN ({q}) AND gc.status IN ('missing_recoverable', 'partial', 'source_unavailable')
-              AND g.game_date >= '2001-10-01' ''').fetchall():
+              AND g.game_date >= '1996-10-01' ''').fetchall():
         if gid not in matches:
             att += [(dom, gid, 'not_found', 'no ESPN event with this date and score') for dom in DOMAINS]
+    # quarter scores from ESPN line scores, for games with none; each side must add up to its official final
+    have_per = {r[0] for r in c.execute('SELECT DISTINCT game_id FROM core.fact_game_period_score').fetchall()}
+    per_rows = []
+    for (gid,) in c.execute("SELECT game_id FROM audit.game_coverage WHERE domain = 'period_scores' AND status <> 'present'").fetchall():
+        f = CACHE / 'summary' / f'{matches.get(gid)}.json'
+        if gid in have_per or gid not in matches or not f.exists() or gid not in games:
+            continue
+        comp = ((json.loads(f.read_text()).get('header') or {}).get('competitions') or [{}])[0]
+        lines = {}
+        for x in comp.get('competitors') or []:
+            vals = [str(l.get('displayValue', '')).strip() for l in x.get('linescores') or []]
+            lines[x.get('homeAway')] = [int(v) for v in vals] if vals and all(v.isdigit() for v in vals) else []
+        h, a = lines.get('home') or [], lines.get('away') or []
+        hs, aws = finals.get(gid, (None, None))
+        ok = h and len(h) == len(a) and sum(h) == hs and sum(a) == aws and all(sum(h[:i]) == sum(a[:i]) for i in range(4, len(h)))
+        if ok:
+            per_rows += [(gid, games[gid][0], i + 1, v) for i, v in enumerate(h)] + [(gid, games[gid][1], i + 1, v) for i, v in enumerate(a)]
+        att.append(('period_scores', gid, 'admitted' if ok else 'no_data' if not h else 'mismatch',
+                    'line score adds up to the final' if ok else 'no line score' if not h else 'line score does not add up'))
+    if per_rows:
+        c.executemany('INSERT INTO core.fact_game_period_score VALUES (?,?,?,?)', per_rows)
     if ev:
         c.executemany(f'INSERT INTO core.fact_play_event VALUES ({",".join("?" * 17)})', ev)
     if sh:
@@ -182,7 +249,7 @@ def load(c, matches: dict) -> None:
         c.executemany('INSERT INTO raw.espn_api_starter VALUES (?,?,?)', starters)
     # games ESPN filled stay recorded across runs (later runs skip them because they already have rows)
     c.execute('CREATE TABLE IF NOT EXISTS audit.espn_api_fill (domain VARCHAR, game_id VARCHAR, espn_event_id VARCHAR, filled_at TIMESTAMPTZ, PRIMARY KEY (domain, game_id))')
-    filled = [(dm, g, matches[g]) for dm, g, o, _ in att if o == 'admitted' and dm in ('play_by_play', 'shot_chart')]
+    filled = [(dm, g, matches[g]) for dm, g, o, _ in att if o == 'admitted' and dm in ('play_by_play', 'shot_chart', 'period_scores')]
     if filled:
         c.executemany('INSERT OR IGNORE INTO audit.espn_api_fill VALUES (?,?,?,now())', filled)
     done = set(c.execute("SELECT domain, game_id FROM audit.espn_api_fill").fetchall())
@@ -190,7 +257,7 @@ def load(c, matches: dict) -> None:
     c.execute('DELETE FROM audit.gap_attempt WHERE source = ?', [SOURCE])
     if att:
         c.executemany('INSERT INTO audit.gap_attempt VALUES (?,?,?,now(),?,?)', [(dm, g, SOURCE, o, n) for dm, g, o, n in att])
-    print('espn: play events', len(ev), '| shots', len(sh), '| officials', len(refs), '| starters', len(starters))
+    print('espn: quarter-score games', len(per_rows) // 8 if per_rows else 0, '| play events', len(ev), '| shots', len(sh), '| officials', len(refs), '| starters', len(starters))
 
 
 if __name__ == '__main__':

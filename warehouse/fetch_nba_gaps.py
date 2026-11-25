@@ -2,7 +2,7 @@
 
   lineups  boxscoretraditionalv3 for starting_lineup gaps (starters carry a position)
   pbp      playbyplayv3 for play_by_play and shot_chart gaps (actions include shot coordinates)
-  officials boxscoresummaryv3 for officials gaps (the v2 summary returns no officials for many of these games)
+  officials boxscoresummaryv3 for officials and period_scores gaps (officials and quarter scores; v2 lacks officials for many)
 
 Responses are cached as JSON under evidence/nba-gaps/<endpoint>/<game_id>.json and never refetched; an empty
 response is cached too (that game then counts as a failed NBA.com attempt in audit.gap_attempt when loaded).
@@ -38,7 +38,7 @@ def run(kind: str) -> None:
     endpoint, domains, call = {
         'lineups': ('boxscoretraditionalv3', ['starting_lineup'], lambda g: boxscoretraditionalv3.BoxScoreTraditionalV3(game_id=g, timeout=60)),
         'pbp': ('playbyplayv3', ['play_by_play', 'shot_chart'], lambda g: playbyplayv3.PlayByPlayV3(game_id=g, timeout=60)),
-        'officials': ('boxscoresummaryv3', ['officials'], lambda g: boxscoresummaryv3.BoxScoreSummaryV3(game_id=g, timeout=60)),
+        'officials': ('boxscoresummaryv3', ['officials', 'period_scores'], lambda g: boxscoresummaryv3.BoxScoreSummaryV3(game_id=g, timeout=60)),
     }[kind]
     d = CACHE / endpoint
     d.mkdir(parents=True, exist_ok=True)

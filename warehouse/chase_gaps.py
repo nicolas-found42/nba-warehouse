@@ -110,6 +110,9 @@ def finalize(warehouse: Path) -> None:
         load_nba_gaps.pbp(c)
         load_nba_gaps.boxes(c)
         load_nba_gaps.officials(c)
+        load_nba_gaps.periods(c)
+        load_nba_gaps.pbp_starters(c)
+        load_nba_gaps.team_from_players(c)
         import load_espn  # ESPN public API (owner-approved 2026-11-25), lowest rank, fills only games nothing else covers
         if (load_espn.CACHE / 'matches.json').exists():
             load_espn.load(c, json.loads((load_espn.CACHE / 'matches.json').read_text()))

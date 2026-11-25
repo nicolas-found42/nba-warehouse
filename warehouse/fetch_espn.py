@@ -23,7 +23,7 @@ from build_warehouse import DEFAULT_OUT
 
 CACHE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence' / 'espn-api'
 BASE = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba'
-DOMAINS = ('play_by_play', 'shot_chart', 'officials', 'starting_lineup')
+DOMAINS = ('play_by_play', 'shot_chart', 'officials', 'starting_lineup', 'player_box', 'team_box', 'period_scores')
 PAUSE = 0.3
 
 
@@ -51,7 +51,7 @@ def gap_games() -> list[tuple]:
     rows = c.execute(f'''SELECT DISTINCT g.game_id, strftime(g.game_date, '%Y%m%d'), r.home_score, r.away_score
         FROM audit.game_coverage gc JOIN core.dim_game g USING (game_id) JOIN core.fact_game_result r USING (game_id)
         WHERE gc.domain IN ({q}) AND gc.status IN ('missing_recoverable', 'partial', 'source_unavailable')
-          AND g.game_date >= '2001-10-01' ORDER BY 2, 1''').fetchall()
+          AND g.game_date >= '1996-10-01' ORDER BY 2, 1''').fetchall()
     c.close()
     return rows
 

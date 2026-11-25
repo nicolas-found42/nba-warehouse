@@ -185,7 +185,11 @@ DOMAINS: list[Domain] = [
               SELECT * FROM hi
               UNION ALL  -- ESPN public API starters (load_espn.py, owner-approved), lowest rank: only teams no source above names starters for
               SELECT game_id, team_id, person_id, NULL, 'espn_api' FROM raw.espn_api_starter
-              WHERE (game_id, team_id) NOT IN (SELECT game_id, team_id FROM hi)''',
+              WHERE (game_id, team_id) NOT IN (SELECT game_id, team_id FROM hi)
+              UNION ALL  -- starters inferred from NBA play-by-play (load_nba_gaps.pbp_starters), only teams no source names starters for
+              SELECT game_id, team_id, person_id, NULL, 'pbp_inferred' FROM raw.pbp_inferred_starter
+              WHERE (game_id, team_id) NOT IN (SELECT game_id, team_id FROM hi)
+                AND (game_id, team_id) NOT IN (SELECT game_id, team_id FROM raw.espn_api_starter)''',
            key=['game_id', 'person_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'person_id': 'core.dim_person(person_id)',
                 '(game_id, team_id)': 'core.bridge_game_team(game_id, team_id)'},
@@ -230,14 +234,14 @@ SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num, 'nba
               UNION ALL
               SELECT game_id, official_id, NULL, 'espn' FROM raw.bridge_official_espn
               WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL AND game_id IS NOT NULL
-                AND game_id NOT IN (SELECT game_id FROM raw.officials)
+                AND game_id NOT IN (SELECT game_id FROM raw.officials) AND game_id NOT IN (SELECT game_id FROM raw.nba_gap_official)
               UNION ALL  -- Kaggle eoinamoore game officials (names, NBA.com-sourced), only for games neither source above has;
                          -- a name is used only when it matches exactly one referee
               SELECT g.game_id, o.official_id, o.jersey_num, 'kaggle_eoinamoore'
               FROM (SELECT DISTINCT lpad(gameId, 10, '0') AS game_id, trim(unnest(string_split(officials, ','))) AS name
                     FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__games WHERE nullif(trim(officials), '') IS NOT NULL) g
               JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('g.name') + '''
-              WHERE g.game_id NOT IN (SELECT game_id FROM raw.officials)
+              WHERE g.game_id NOT IN (SELECT game_id FROM raw.officials) AND g.game_id NOT IN (SELECT game_id FROM raw.nba_gap_official)
                 AND g.game_id NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
                                       AND official_id IS NOT NULL AND game_id IS NOT NULL)
               UNION ALL  -- Kaggle kyleknowles1 referee assignments 2016-2026 (NBA game and referee ids), only for games no source above has
@@ -249,6 +253,7 @@ SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num, 'nba
               LEFT JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('k.name') + '''
               WHERE nullif(trim(k.code), '') IS NOT NULL
                 AND lpad(k.game_id, 10, '0') NOT IN (SELECT game_id FROM raw.officials)
+                AND lpad(k.game_id, 10, '0') NOT IN (SELECT game_id FROM raw.nba_gap_official)
                 AND lpad(k.game_id, 10, '0') NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
                                                     AND official_id IS NOT NULL AND game_id IS NOT NULL)
                 AND lpad(k.game_id, 10, '0') NOT IN (SELECT lpad(gameId, 10, '0') FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__games
@@ -258,7 +263,7 @@ SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num, 'nba
               FROM raw.espn_sdv_game_official e
               JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('e.official_full_name') + '''
               WHERE e.game_id IS NOT NULL
-                AND e.game_id NOT IN (SELECT game_id FROM raw.officials)
+                AND e.game_id NOT IN (SELECT game_id FROM raw.officials) AND e.game_id NOT IN (SELECT game_id FROM raw.nba_gap_official)
                 AND e.game_id NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
                                       AND official_id IS NOT NULL AND game_id IS NOT NULL)
                 AND e.game_id NOT IN (SELECT lpad(gameId, 10, '0') FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__games
@@ -284,6 +289,12 @@ espn_only AS (  -- games whose crew comes only from ESPN, which Basketball-Refer
               FROM raw.espn_api_game_official e
               JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('e.official_name') + '''
               WHERE e.game_id NOT IN (SELECT game_id FROM base) AND e.game_id NOT IN (SELECT game_id FROM bb)
+              UNION ALL  -- Wikipedia All-Star Game infobox crews (load_wiki_officials.py), lowest rank, only games no source above names anyone for
+              SELECT DISTINCT w.game_id, o.official_id, o.jersey_num, 'wikipedia'
+              FROM raw.wiki_game_official w
+              JOIN ''' + OFFICIAL_NAME_CANON + ''' o ON o.name = ''' + norm_name('w.official_name') + '''
+              WHERE w.game_id NOT IN (SELECT game_id FROM base) AND w.game_id NOT IN (SELECT game_id FROM bb)
+                AND w.game_id NOT IN (SELECT game_id FROM raw.espn_api_game_official)
               UNION ALL  -- otherwise Basketball-Reference completes crews of fewer than 3, or gives a full crew where no source has one
               SELECT * FROM bb
               WHERE bb.game_id NOT IN (SELECT game_id FROM espn_only)
