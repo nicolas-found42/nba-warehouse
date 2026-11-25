@@ -75,9 +75,15 @@ FROM betting.price_pair
 WHERE observed_at < tipoff_at AND phase IN ('prematch', 'intraday', 'open', 'close');
 
 CREATE OR REPLACE MACRO betting.odds_at(fixture, known_at) AS TABLE
-SELECT * EXCLUDE (quotes_at_timestamp) FROM betting.eligible_pregame_prices
-WHERE game_id = fixture AND observed_at <= known_at AND quotes_at_timestamp = 1
-QUALIFY observed_at = max(observed_at) OVER (PARTITION BY source, book, market, handicap);
+WITH schedule AS (
+    SELECT tipoff_at FROM core.pregame_fixture_at(fixture, known_at)
+    WHERE fixture_observed_at IS NOT NULL
+)
+SELECT p.* EXCLUDE (quotes_at_timestamp) REPLACE (s.tipoff_at AS tipoff_at)
+FROM betting.eligible_pregame_prices p LEFT JOIN schedule s ON true
+WHERE p.game_id = fixture AND p.observed_at <= known_at AND p.quotes_at_timestamp = 1
+  AND (s.tipoff_at IS NULL OR p.observed_at < s.tipoff_at)
+QUALIFY p.observed_at = max(p.observed_at) OVER (PARTITION BY p.source, p.book, p.market, p.handicap);
 
 CREATE OR REPLACE VIEW betting.closing_price AS
 SELECT * EXCLUDE (quotes_at_timestamp) FROM betting.eligible_pregame_prices

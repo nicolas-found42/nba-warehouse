@@ -118,6 +118,7 @@ remain in `audit.nba_initial_schedule_resolution`.
 `betting.price_pair` covers full-game moneyline, spread and totals. It exposes decimal prices, implied probabilities,
 overround and two-sided vig removal, with original values in the source tables. `betting.closing_price` uses the last
 unambiguous quote strictly before the scheduled tip-off for the same source, book, market and points line.
+`betting.odds_at` exposes the published tip time available at its cutoff when one exists and also enforces it as a quote boundary.
 `betting.closing_line_value` is an after-the-fact comparison against that quote. Publisher-labelled opens and closes with
 no quote time are visible through `betting.reported_open_close`. The original Pinnacle files lack a verified timezone,
 so their prices remain visible in `betting.price_pair` and are withheld from the cutoff queries.

@@ -226,7 +226,11 @@ def test_usatoday_fixture_allows_only_verified_neutral_venue_reversal():
 
 def test_odds_cutoffs_closing_conflicts_and_price_conversion():
     c = duckdb.connect()
-    c.execute('''CREATE SCHEMA betting;
+    c.execute('''CREATE SCHEMA betting; CREATE SCHEMA core;
+        CREATE TABLE core.observed_schedule(game_id VARCHAR,tipoff_at TIMESTAMPTZ,fixture_observed_at TIMESTAMPTZ);
+        CREATE MACRO core.pregame_fixture_at(fixture,known_at) AS TABLE
+            SELECT * FROM core.observed_schedule WHERE game_id=fixture AND fixture_observed_at<=known_at
+            QUALIFY fixture_observed_at=max(fixture_observed_at) OVER ();
         CREATE TABLE betting.price_pair (game_id VARCHAR, source VARCHAR, book VARCHAR, market VARCHAR, handicap DOUBLE,
             observed_at TIMESTAMPTZ, tipoff_at TIMESTAMPTZ, phase VARCHAR, decimal_home_or_over DOUBLE, decimal_away_or_under DOUBLE);
         INSERT INTO betting.price_pair VALUES
@@ -245,4 +249,11 @@ def test_odds_cutoffs_closing_conflicts_and_price_conversion():
     for clock, price in [('16:59', []), ('17:00', [(2.4,)]), ('19:58', [(2.4,)]), ('19:59', [(2.0,)]), ('20:00', [(2.0,)])]:
         assert c.execute("SELECT decimal_home_or_over FROM betting.odds_at('game', ?::TIMESTAMPTZ)",
                          [f'2026-11-24 {clock}:00Z']).fetchall() == price
+    c.execute('''INSERT INTO core.observed_schedule VALUES
+        ('game','2026-11-24 18:30:00Z','2026-11-24 17:30:00Z'),
+        ('game','2026-11-24 20:30:00Z','2026-11-24 19:59:30Z');''')
+    outcomes = [('17:00:00', 2.4, None), ('19:59:00', 2.4, 18), ('20:00:00', 2.0, 20)]
+    for cutoff, price, tip_hour in outcomes:
+        assert c.execute("""SELECT decimal_home_or_over,hour(tipoff_at AT TIME ZONE 'UTC')
+            FROM betting.odds_at('game',?::TIMESTAMPTZ)""", [f'2026-11-24 {cutoff}Z']).fetchall() == [(price, tip_hour)]
     assert c.execute('SELECT source, round(clv_home_or_over, 3) FROM betting.closing_line_value').fetchall() == [('a', 0.2)]

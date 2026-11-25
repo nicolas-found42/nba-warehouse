@@ -21,6 +21,7 @@ from pathlib import Path
 
 from build_warehouse import DEFAULT_OUT, connect, warehouse_lock
 from betting_kaggle import build_kaggle
+from pregame_sources import publish as publish_pregame
 
 SQL = r"""
 CREATE SCHEMA IF NOT EXISTS betting;
@@ -241,6 +242,7 @@ def build(c) -> None:
     try:
         c.execute(SQL)
         build_kaggle(c)
+        publish_pregame(c)
         c.execute(Path(__file__).with_name('betting_features.sql').read_text())
         for raw, bet in [('fact_game_odds_snapshot', 'odds_snapshot'), ('fact_game_betting_lines', 'game_line'),
                          ('fact_game_main_line', 'main_line'), ('fact_game_market_odds', 'market_odds')]:

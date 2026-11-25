@@ -341,11 +341,15 @@ access restrictions establish only that the requested route could not be checked
 - The NBA index, Billmill's 2026–27 data and archived NBA index pages identify 520 October–November 2026 filenames.
   Quarter-hour slots on many days still need the direct NBA capture. The July archive names 77 Summer League files, all
   recovered. An October 1 archive copy labelled 12:45 p.m. prints a 12:56 p.m. Eastern timestamp. The warehouse keeps
-  the original filename and retrieval route and uses the printed time.
+  the original filename and retrieval route and uses the printed time. The five rows list Boston at Detroit on October 1.
+  Neither team’s preseason schedule includes that fixture, so the rows stay unmatched. The NBA records the teams’ regular
+  season opener on October 20.
   [Current NBA index](https://www.nba.com/players/injury-report)
   [Archived October index](https://web.archive.org/web/20261024021942/https://official.nba.com/nba-injury-report-2026-27-season/)
   [July original PDF](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-07-08_12_45PM.pdf)
   [October 1 original replay](https://web.archive.org/web/20261002063922id_/https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-10-01_12_45PM.pdf)
+  [Boston preseason schedule](https://www.nba.com/celtics/news/celtics-announce-2026-27-preseason-schedule)
+  [Detroit schedule](https://www.nba.com/pistons/news/detroit-pistons-announce-2026-27-season-schedule-presented-by-ticketmaster)
 
 - The NBA PDF cache keeps printed timestamps, statuses and notices. The season mirror covers 2019–2027 and contains
   selected pregame snapshots. Strict pregame queries corroborate identities with the roster available at the cutoff.
