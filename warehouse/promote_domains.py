@@ -140,12 +140,23 @@ DOMAINS: list[Domain] = [
            fks={'person_id': 'core.dim_person(person_id)', 'team_id': 'core.dim_team(team_id)',
                 'season_year': 'core.dim_season(season_year)'},
            not_null=['person_id', 'team_id', 'season_year']),
-    Domain('fact_starting_lineup', 'raw.fact_starting_lineup_player (1996-) + box-score starting positions where no lineup row exists',
+    Domain('fact_starting_lineup', 'raw.fact_starting_lineup_player (1996-) + box-score starting positions where no lineup row exists + Kaggle eoinamoore starters for games neither has',
            '''SELECT game_id, team_id, person_id, starting_position, 'nba_starting_lineup' AS source FROM raw.fact_starting_lineup_player
               UNION ALL
               SELECT game_id, team_id, person_id, starting_position, 'box_score_starting_position' FROM core.fact_player_game_stats
               WHERE nullif(trim(starting_position), '') IS NOT NULL
-                AND game_id NOT IN (SELECT game_id FROM raw.fact_starting_lineup_player)''',
+                AND game_id NOT IN (SELECT game_id FROM raw.fact_starting_lineup_player)
+              UNION ALL  -- NBA.com boxscoretraditionalv3 starters fetched for remaining gaps (load_nba_gaps.py)
+              SELECT game_id, team_id, person_id, starting_position, 'nba_boxscore_v3' FROM raw.nba_gap_starter
+              WHERE game_id NOT IN (SELECT game_id FROM raw.fact_starting_lineup_player)
+                AND game_id NOT IN (SELECT game_id FROM core.fact_player_game_stats WHERE nullif(trim(starting_position), '') IS NOT NULL)
+              UNION ALL  -- Kaggle eoinamoore box scores (NBA.com-sourced) only for games no source above covers
+              SELECT lpad(gameId, 10, '0'), try_cast(playerteamId AS BIGINT), try_cast(personId AS BIGINT), trim(startingPosition), 'kaggle_eoinamoore'
+              FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__playerstatistics
+              WHERE nullif(trim(startingPosition), '') IS NOT NULL
+                AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.fact_starting_lineup_player)
+                AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM core.fact_player_game_stats WHERE nullif(trim(starting_position), '') IS NOT NULL)
+                AND lpad(gameId, 10, '0') NOT IN (SELECT game_id FROM raw.nba_gap_starter)''',
            key=['game_id', 'person_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'person_id': 'core.dim_person(person_id)',
                 '(game_id, team_id)': 'core.bridge_game_team(game_id, team_id)'},
@@ -172,12 +183,22 @@ DOMAINS: list[Domain] = [
                     FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL)
               GROUP BY 1 HAVING bool_or(pref = 1) OR true''',
            key=['official_id'], not_null=['official_id']),
-    Domain('fact_game_official', 'raw.officials (NBA box-score officials, 1996-2023); ESPN-resolved officials only for games NBA data lacks',
+    Domain('fact_game_official', 'raw.officials (NBA box-score officials, 1996-2023); ESPN-resolved officials, then Kaggle eoinamoore names, only for games NBA data lacks',
            '''SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num, 'nba_box_summary' AS source FROM raw.officials
               UNION ALL
               SELECT game_id, official_id, NULL, 'espn' FROM raw.bridge_official_espn
               WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL AND game_id IS NOT NULL
-                AND game_id NOT IN (SELECT game_id FROM raw.officials)''',
+                AND game_id NOT IN (SELECT game_id FROM raw.officials)
+              UNION ALL  -- Kaggle eoinamoore game officials (names, NBA.com-sourced), only for games neither source above has;
+                         -- a name is used only when it matches exactly one referee
+              SELECT g.game_id, o.official_id, o.jersey_num, 'kaggle_eoinamoore'
+              FROM (SELECT DISTINCT lpad(gameId, 10, '0') AS game_id, trim(unnest(string_split(officials, ','))) AS name
+                    FROM raw_kaggle.eoinamoore_historical_nba_data_and_player_box_scores__games WHERE nullif(trim(officials), '') IS NOT NULL) g
+              JOIN (SELECT lower(first_name || ' ' || last_name) AS name, any_value(official_id) AS official_id, any_value(jersey_num) AS jersey_num
+                    FROM core.dim_official GROUP BY 1 HAVING count(*) = 1) o ON o.name = lower(g.name)
+              WHERE g.game_id NOT IN (SELECT game_id FROM raw.officials)
+                AND g.game_id NOT IN (SELECT game_id FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved
+                                      AND official_id IS NOT NULL AND game_id IS NOT NULL)''',
            key=['game_id', 'official_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'official_id': 'core.dim_official(official_id)'},
            not_null=['game_id', 'official_id']),
