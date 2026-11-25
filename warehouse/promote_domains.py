@@ -203,6 +203,7 @@ DOMAINS: list[Domain] = [
            '''SELECT official_id, arg_min(first_name, pref) AS first_name, arg_min(last_name, pref) AS last_name, arg_min(jersey_num, pref) AS jersey_num
               FROM (SELECT try_cast(official_id AS BIGINT) AS official_id, first_name, last_name, jersey_num, 1 AS pref FROM raw.dim_official
                     UNION ALL SELECT try_cast(official_id AS BIGINT), first_name, last_name, jersey_num, 1 FROM raw.officials
+                    UNION ALL SELECT official_id, first_name, last_name, jersey_num, 1 FROM raw.nba_gap_official
                     UNION ALL SELECT official_id, split_part(espn_official_full_name, ' ', 1),
                                      trim(substr(espn_official_full_name, length(split_part(espn_official_full_name, ' ', 1)) + 2)), NULL, 2
                     FROM raw.bridge_official_espn WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL
@@ -219,6 +220,9 @@ DOMAINS: list[Domain] = [
     Domain('fact_game_official', 'raw.officials (NBA box-score officials, 1996-2023); ESPN-resolved officials, then Kaggle eoinamoore names, only for games NBA data lacks',
            '''WITH base AS (
 SELECT game_id, try_cast(official_id AS BIGINT) AS official_id, jersey_num, 'nba_box_summary' AS source FROM raw.officials
+              UNION ALL  -- NBA.com boxscoresummaryv3 referees (load_nba_gaps.officials), for games the summary data above lacks
+              SELECT DISTINCT game_id, official_id, jersey_num, 'nba_summary_v3' FROM raw.nba_gap_official
+              WHERE game_id NOT IN (SELECT game_id FROM raw.officials)
               UNION ALL
               SELECT game_id, official_id, NULL, 'espn' FROM raw.bridge_official_espn
               WHERE NOT is_ambiguous AND NOT is_unresolved AND official_id IS NOT NULL AND game_id IS NOT NULL
@@ -271,10 +275,11 @@ espn_only AS (  -- games whose crew comes only from ESPN, which Basketball-Refer
               SELECT * FROM base WHERE game_id NOT IN (SELECT game_id FROM espn_only WHERE game_id IN (SELECT game_id FROM bb_full))
               UNION ALL  -- a full Basketball-Reference crew replaces an ESPN-only crew
               SELECT * FROM bb WHERE game_id IN (SELECT game_id FROM espn_only) AND game_id IN (SELECT game_id FROM bb_full)
-              UNION ALL  -- otherwise Basketball-Reference only completes games where NBA-sourced data names fewer than 3 officials
+              UNION ALL  -- otherwise Basketball-Reference completes crews of fewer than 3, or gives a full crew where no source has one
               SELECT * FROM bb
               WHERE bb.game_id NOT IN (SELECT game_id FROM espn_only)
-                AND bb.game_id IN (SELECT game_id FROM base GROUP BY 1 HAVING count(DISTINCT official_id) < 3)
+                AND (bb.game_id IN (SELECT game_id FROM base GROUP BY 1 HAVING count(DISTINCT official_id) < 3)
+                     OR (bb.game_id NOT IN (SELECT game_id FROM base) AND bb.game_id IN (SELECT game_id FROM bb_full)))
                 AND (bb.game_id, bb.official_id) NOT IN (SELECT game_id, official_id FROM base)''',
            key=['game_id', 'official_id'],
            fks={'game_id': 'core.dim_game(game_id)', 'official_id': 'core.dim_official(official_id)'},

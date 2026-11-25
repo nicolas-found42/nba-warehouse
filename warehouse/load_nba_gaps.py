@@ -130,6 +130,89 @@ def pbp(c) -> None:
           '| shots', len(sh), 'games', sum(a[1] == 'admitted' for a in att_shot), 'of', len(att_shot))
 
 
+def officials(c) -> None:
+    """raw.nba_gap_official: referees (NBA ids) from cached boxscoresummaryv3 responses; promoted into core.fact_game_official
+    by promote_domains.py for games the NBA box-score summary data lacks."""
+    rows, attempts = [], []
+    for f in sorted((CACHE / 'boxscoresummaryv3').glob('*.json')):
+        o = (json.loads(f.read_text()).get('boxScoreSummary') or {}).get('officials') or []
+        got = [(f.stem, num(x.get('personId')), (x.get('firstName') or '').strip(), (x.get('familyName') or '').strip(),
+                (x.get('jerseyNum') or '').strip() or None) for x in o if num(x.get('personId'))]
+        rows += got
+        attempts.append((f.stem, 'admitted' if got else 'no_data', f'{len(got)} officials'))
+    c.execute('CREATE OR REPLACE TABLE raw.nba_gap_official (game_id VARCHAR, official_id BIGINT, first_name VARCHAR, last_name VARCHAR, jersey_num VARCHAR)')
+    if rows:
+        c.executemany('INSERT INTO raw.nba_gap_official VALUES (?,?,?,?,?)', rows)
+    log(c, 'officials', attempts)
+    print('officials from NBA.com v3:', len(rows), 'rows,', sum(a[1] == 'admitted' for a in attempts), 'of', len(attempts), 'games')
+
+
+def mins(v) -> float | None:
+    m = re.fullmatch(r'(\d+):(\d+)(?:\.\d+)?', (v or '').strip())
+    return int(m.group(1)) + int(m.group(2)) / 60 if m else None
+
+
+def boxes(c) -> None:
+    """Team and player box rows from cached boxscoretraditionalv3 responses, for team-games core has no rows for.
+    A team's totals are admitted only when its points equal the official final; its player rows only when the players'
+    points add up to it and every player is in core.dim_person."""
+    gaps = {r for r in c.execute('''SELECT domain, game_id FROM audit.game_coverage
+        WHERE domain IN ('team_box', 'player_box') AND status IN ('missing_recoverable', 'partial', 'source_unavailable')''').fetchall()}
+    score = {(g, t): s for g, t, s in c.execute('''SELECT g.game_id, g.home_team_id, r.home_score FROM core.dim_game g JOIN core.fact_game_result r USING (game_id)
+        UNION ALL SELECT g.game_id, g.away_team_id, r.away_score FROM core.dim_game g JOIN core.fact_game_result r USING (game_id)''').fetchall()}
+    teams = set(c.execute('SELECT game_id, team_id FROM core.bridge_game_team').fetchall())
+    have_t = set(c.execute('SELECT game_id, team_id FROM core.fact_team_game_stats').fetchall())
+    have_p = set(c.execute('SELECT DISTINCT game_id, team_id FROM core.fact_player_game_stats').fetchall())
+    persons = {r[0] for r in c.execute('SELECT person_id FROM core.dim_person').fetchall()}
+    trows, prows, att = [], [], {'team_box': {}, 'player_box': {}}
+    for dom, g in sorted(gaps):
+        f = CACHE / 'boxscoretraditionalv3' / f'{g}.json'
+        if not f.exists():
+            continue
+        b = json.loads(f.read_text()).get('boxScoreTraditional') or {}
+        got = 0
+        for side, opp in (('homeTeam', 'awayTeam'), ('awayTeam', 'homeTeam')):
+            t, o = b.get(side) or {}, b.get(opp) or {}
+            tid, oid, st = num(t.get('teamId')), num(o.get('teamId')), t.get('statistics') or {}
+            if (g, tid) not in teams or score.get((g, tid)) is None or st.get('points') != score[(g, tid)]:
+                continue
+            if any((st.get(m) or 0) > (st.get(a) or 0) for m, a in (('fieldGoalsMade', 'fieldGoalsAttempted'),
+                   ('threePointersMade', 'threePointersAttempted'), ('freeThrowsMade', 'freeThrowsAttempted'))):
+                continue  # attempts not recorded (old-era placeholders): not admitted
+            win, home = score[(g, tid)] > (score.get((g, oid)) or 0), side == 'homeTeam'
+            if dom == 'team_box' and (g, tid) not in have_t:
+                trows.append((g, tid, home, win, mins(st.get('minutes')), st['points'], st.get('fieldGoalsMade'), st.get('fieldGoalsAttempted'),
+                              st.get('threePointersMade'), st.get('threePointersAttempted'), st.get('freeThrowsMade'), st.get('freeThrowsAttempted'),
+                              st.get('reboundsOffensive'), st.get('reboundsDefensive'), st.get('reboundsTotal'), st.get('assists'), st.get('turnovers'),
+                              st.get('steals'), st.get('blocks'), st.get('foulsPersonal')))
+                have_t.add((g, tid))
+                got += 1
+            players = t.get('players') or []
+            if (dom == 'player_box' and (g, tid) not in have_p and players and all(num(p.get('personId')) in persons for p in players)
+                    and sum((p.get('statistics') or {}).get('points') or 0 for p in players) == st['points']):
+                for p in players:
+                    s = p.get('statistics') or {}
+                    m = mins(s.get('minutes'))
+                    prows.append((g, num(p['personId']), tid, oid, home, win, 'played' if m else 'dnp', (p.get('position') or '').strip() or None,
+                                  (p.get('comment') or '').strip() or None, m, m, s.get('points'), s.get('assists'), s.get('blocks'), s.get('steals'),
+                                  s.get('turnovers'), s.get('fieldGoalsAttempted'), s.get('fieldGoalsMade'), s.get('threePointersAttempted'),
+                                  s.get('threePointersMade'), s.get('freeThrowsAttempted'), s.get('freeThrowsMade'), s.get('reboundsOffensive'),
+                                  s.get('reboundsDefensive'), s.get('reboundsTotal'), s.get('foulsPersonal'), num(s.get('plusMinusPoints'))))
+                have_p.add((g, tid))
+                got += 1
+        att[dom][g] = (g, 'admitted' if got else 'no_data', f'{got} team-games')
+    if trows:
+        c.executemany('''INSERT INTO core.fact_team_game_stats (game_id, team_id, is_home, is_win, min, pts, fgm, fga, fg3m, fg3a, ftm, fta,
+            oreb, dreb, reb, ast, tov, stl, blk, pf) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', trows)
+    if prows:
+        c.executemany('''INSERT INTO core.fact_player_game_stats (game_id, person_id, team_id, opponent_team_id, is_home, is_win, participation_status,
+            starting_position, comment, num_minutes, reported_num_minutes, points, assists, blocks, steals, turnovers, fga, fgm, fg3a, fg3m,
+            fta, ftm, oreb, dreb, reb, fouls_personal, plus_minus) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', prows)
+    for dom, a in att.items():
+        log(c, dom, list(a.values()))
+    print('box rows from NBA.com: team', len(trows), '| player', len(prows), 'rows')
+
+
 def log(c, domain: str, attempts: list[tuple]) -> None:
     c.execute('DELETE FROM audit.gap_attempt WHERE domain = ? AND source = ?', [domain, SOURCE])
     if attempts:
@@ -142,5 +225,7 @@ if __name__ == '__main__':
         starters(con)
         llimllib_starters(con)
         pbp(con)
+        boxes(con)
+        officials(con)
         con.execute('CHECKPOINT')
         con.close()

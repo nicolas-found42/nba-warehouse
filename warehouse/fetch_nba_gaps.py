@@ -2,11 +2,12 @@
 
   lineups  boxscoretraditionalv3 for starting_lineup gaps (starters carry a position)
   pbp      playbyplayv3 for play_by_play and shot_chart gaps (actions include shot coordinates)
+  officials boxscoresummaryv3 for officials gaps (the v2 summary returns no officials for many of these games)
 
 Responses are cached as JSON under evidence/nba-gaps/<endpoint>/<game_id>.json and never refetched; an empty
 response is cached too (that game then counts as a failed NBA.com attempt in audit.gap_attempt when loaded).
 
-  uv run --no-project --with nba_api --with duckdb==2.0.0 python warehouse/fetch_nba_gaps.py lineups|pbp
+  uv run --no-project --with nba_api --with duckdb==2.0.0 python warehouse/fetch_nba_gaps.py lineups|pbp|officials
 """
 from __future__ import annotations
 
@@ -27,16 +28,17 @@ def games(domains: list[str]) -> list[str]:
     c = duckdb.connect(str(DEFAULT_OUT), read_only=True)
     q = ','.join(f"'{d}'" for d in domains)
     out = [r[0] for r in c.execute(f"""SELECT DISTINCT game_id FROM audit.game_coverage
-        WHERE domain IN ({q}) AND status IN ('missing_recoverable', 'partial') ORDER BY 1""").fetchall()]
+        WHERE domain IN ({q}) AND status IN ('missing_recoverable', 'partial', 'source_unavailable') ORDER BY 1""").fetchall()]
     c.close()
     return out
 
 
 def run(kind: str) -> None:
-    from nba_api.stats.endpoints import boxscoretraditionalv3, playbyplayv3
+    from nba_api.stats.endpoints import boxscoresummaryv3, boxscoretraditionalv3, playbyplayv3
     endpoint, domains, call = {
         'lineups': ('boxscoretraditionalv3', ['starting_lineup'], lambda g: boxscoretraditionalv3.BoxScoreTraditionalV3(game_id=g, timeout=60)),
         'pbp': ('playbyplayv3', ['play_by_play', 'shot_chart'], lambda g: playbyplayv3.PlayByPlayV3(game_id=g, timeout=60)),
+        'officials': ('boxscoresummaryv3', ['officials'], lambda g: boxscoresummaryv3.BoxScoreSummaryV3(game_id=g, timeout=60)),
     }[kind]
     d = CACHE / endpoint
     d.mkdir(parents=True, exist_ok=True)
@@ -63,5 +65,5 @@ def run(kind: str) -> None:
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('kind', choices=['lineups', 'pbp'])
+    ap.add_argument('kind', choices=['lineups', 'pbp', 'officials'])
     run(ap.parse_args().kind)

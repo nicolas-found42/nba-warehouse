@@ -108,12 +108,17 @@ def finalize(warehouse: Path) -> None:
         load_nba_gaps.starters(c)
         load_nba_gaps.llimllib_starters(c)
         load_nba_gaps.pbp(c)
+        load_nba_gaps.boxes(c)
+        load_nba_gaps.officials(c)
         for d in pd.DOMAINS:
             if d.name in ('fact_starting_lineup', 'dim_official', 'fact_game_official'):
                 c.execute('DELETE FROM audit.domain_disposition WHERE domain = ?', [d.name])
                 c.execute('DELETE FROM audit.domain_held WHERE domain = ?', [d.name])
                 print(d.name, *pd.promote(c, d), sep='\t', flush=True)
         tracked = ', '.join(f"('{k}', {v})" for k, v in coverage.TRACKED_FROM.items())
+        c.execute(coverage.SQL.replace('{tracked}', tracked))
+        import label_gaps  # per-game bulk-source checks for the gaps still open, then recount
+        label_gaps.label(c)
         c.execute(coverage.SQL.replace('{tracked}', tracked))
         c.execute('CHECKPOINT')
         c.close()

@@ -27,6 +27,27 @@ After the Basketball-Reference crew pages loaded, 686 games still had fewer than
 
 Result: games with fewer than 3 officials fell from 686 to 37.
 
+## Last fills and gap labelling (2026-11-25)
+
+- **NBA.com `boxscoresummaryv3`** (`fetch_nba_gaps.py officials`, `load_nba_gaps.officials`) names the referees for 159 of the 225 games that still had none, mostly 2003-2016 preseason. The v2 summary returned nothing for these games. It ranks as NBA.com (`nba_summary_v3`).
+- **Basketball-Reference box pages** now also give a full crew to regular-season and playoff games that had no referees at all (about 104 games).
+- **NBA.com `boxscoretraditionalv3`** filled 3 team-games and 63 player rows. Rows are admitted only when points match the final and every player is a known person (`load_nba_gaps.boxes`).
+- **`label_gaps.py`** (run by `chase_gaps.py finalize`) checks each open gap against named bulk sources whose coverage period includes the game. It logs `not_found` only when the game is absent, which lets the two-failed-sources rule label it.
+
+Final gap ledger (`audit.game_coverage`):
+
+| Domain | Status | Games | What was checked |
+|---|---|---|---|
+| Play-by-play and shot charts | source_unavailable | 635 each | NBA.com `playbyplayv3`, Kaggle eoinamoore. Mostly 2003-2010 preseason. ESPN's API has about 90% of these (not used without approval). |
+| Quarter scores | source_unavailable | 357 | Basketball-Reference box pages, nbastats.net. Mostly 1946-50. |
+| Referees | source_unavailable | 66 | NBA box summary v2 and v3, Kaggle eoinamoore. Mostly preseason; ESPN's API has some. |
+| Starting lineups | source_unavailable | 49 | NBA.com `boxscoretraditionalv3`, llimllib, NBA starters |
+| Player box | partial / source_unavailable | 19 / 7 | NBA.com v3, eoinamoore, llimllib. Partials are mostly preseason games against foreign clubs, whose players have no NBA ids. |
+| Team box | partial / source_unavailable | 6 / 6 | NBA.com v3, nbastats.net, eoinamoore |
+| Games with fewer than 3 referees | (not a coverage domain) | 37 | Mostly old preseason games, and current-season games still being reported |
+
+No gap remains `missing_recoverable`.
+
 ## Checked and not useful
 
 - Basketball-Reference player game-log pages are disallowed by robots.txt. They were fetched on the owner's decision, at the site's limit of 20 per minute.

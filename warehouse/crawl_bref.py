@@ -98,13 +98,14 @@ def aba_gamelogs() -> None:
 
 
 def partial_crews() -> None:
-    """Box pages for regular-season and playoff games where the warehouse has fewer than 3 officials (the page lists the crew)."""
+    """Box pages for regular-season and playoff games where the warehouse has fewer than 3 officials, or none (the page lists the crew)."""
     import duckdb
     from build_warehouse import DEFAULT_OUT
     c = duckdb.connect(str(DEFAULT_OUT), read_only=True)
     keys = [r[0] for r in c.execute('''
         SELECT strftime(g.game_date, '%Y%m%d') || '0' || t.source_key
-        FROM (SELECT game_id FROM core.fact_game_official GROUP BY 1 HAVING count(*) < 3) o
+        FROM (SELECT game_id FROM core.fact_game_official GROUP BY 1 HAVING count(*) < 3
+              UNION SELECT game_id FROM audit.game_coverage WHERE domain = 'officials' AND status = 'missing_recoverable') o
         JOIN core.dim_game g USING (game_id)
         JOIN core.team_source_id t ON t.team_id = g.home_team_id AND t.source_system = 'basketball_reference' AND t.league = 'NBA'
              AND t.season_end_year = CAST(substr(g.season_year, 1, 4) AS INTEGER) + 1
