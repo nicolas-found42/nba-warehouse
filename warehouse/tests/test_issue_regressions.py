@@ -1,6 +1,8 @@
 import datetime as dt
 import io
+from http.client import IncompleteRead
 from pathlib import Path
+from urllib.error import HTTPError
 
 import duckdb
 import pytest
@@ -77,6 +79,77 @@ def test_injury_pdf_download_recovers_from_connection_reset(monkeypatch, tmp_pat
     path = tmp_path / 'injury.pdf'
     injury_reports.download('https://example.com/injury.pdf', path)
     assert path.read_bytes() == b'%PDF-1.4'
+
+
+@pytest.mark.parametrize(('status', 'body', 'message'), [
+    (403, b'<HTML>Access Denied: failover&#45;waf&#46;nba&#46;com</HTML>', 'HTTP 403, WAF'),
+    (403, b'<HTML>\xffAccess Denied</HTML>', 'unclassified HTTP 403'),
+    (403, b'<?xml version="1.0" encoding="bogus"?><Error/>', 'unclassified HTTP 403'),
+    (403, IncompleteRead(b'<Error'), 'unreadable HTTP 403'),
+    (429, b'', 'HTTP 429'),
+])
+def test_injury_capture_stops_at_source_block_and_keeps_cached_pdfs(monkeypatch, tmp_path, status, body, message):
+    import injury_reports
+
+    now = dt.datetime(2026, 11, 25, 18, tzinfo=ET)
+    day = now.date() - dt.timedelta(days=2)
+    stamps = [dt.datetime.combine(day, dt.time(hour), ET) for hour in range(5)]
+    names = [injury_reports.report_filename(stamp) for stamp in stamps]
+    monkeypatch.setattr(injury_reports, 'CACHE', tmp_path)
+    monkeypatch.setattr(injury_reports, 'slots', lambda _: list(zip(stamps, names)))
+    monkeypatch.setattr(injury_reports.time, 'sleep', lambda _: None)
+    directory = tmp_path / 'pdf'
+    directory.mkdir()
+    (directory / names[4]).write_bytes(b'%PDF-cached')
+    requested = []
+
+    class ResponseBody(io.BytesIO):
+        def read(self, size=-1):
+            if isinstance(body, IncompleteRead):
+                raise body
+            return super().read(size)
+
+    def open_pdf(request, **kwargs):
+        url = request.full_url
+        name = url.rsplit('/', 1)[-1]
+        requested.append(name)
+        if name == names[0]:
+            missing = b'<?xml version="1.0"?><Error><Code>AccessDenied</Code></Error>'
+            raise HTTPError(url, 403, 'Missing object', None, io.BytesIO(missing))
+        if name == names[1]:
+            return io.BytesIO(b'%PDF-new')
+        assert name == names[2]
+        response = ResponseBody() if isinstance(body, IncompleteRead) else io.BytesIO(body)
+        raise HTTPError(url, status, 'Access denied', None, response)
+
+    monkeypatch.setattr(injury_reports, 'urlopen', open_pdf)
+    source = injury_reports.OfficialPdfSource()
+    assert injury_reports.capture_days([day], now, source) == [directory / names[1], directory / names[4]]
+    assert requested == names[:3]
+    assert message in source.blocked
+    assert (directory / names[0]).with_suffix('.missing').is_file()
+    assert not (directory / names[2]).with_suffix('.missing').exists()
+
+
+def test_daily_capture_keeps_valid_pdfs_when_one_is_malformed(monkeypatch):
+    import injury_reports
+
+    valid, malformed = Path('valid.pdf'), Path('malformed.pdf')
+
+    def capture_days(days, now, source):
+        source.blocked = 'NBA source block'
+        return [malformed, valid]
+
+    def read_pdf(path):
+        if path == malformed:
+            raise ValueError('invalid layout')
+        return 'parsed report'
+
+    monkeypatch.setattr(injury_reports, 'capture_days', capture_days)
+    monkeypatch.setattr(injury_reports, 'read_pdf', read_pdf)
+    reports, errors = injury_reports.capture_daily(dt.datetime(2026, 11, 25, tzinfo=ET))
+    assert reports == {valid: 'parsed report'}
+    assert errors == ['NBA source block', f'Held injury report {injury_reports.NBA}{malformed}: invalid layout']
 
 
 def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():

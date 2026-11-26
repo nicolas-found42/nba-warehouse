@@ -226,7 +226,8 @@ def main() -> int:
     pregame = None
     capture_errors = []
     try:
-        injury_reports = capture_daily(now)
+        injury_reports, injury_errors = capture_daily(now)
+        capture_errors.extend(injury_errors)
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         capture_errors.append(f'injury report capture failed: {e}')
     try:

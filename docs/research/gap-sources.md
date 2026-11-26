@@ -358,7 +358,9 @@ access restrictions establish only that the requested route could not be checked
 - The July sweep published 1,498 original Summer League reports across 2022–26, including all 77 files in the
   initial 2026 July archive. A supplemental annual archive index contributed 129 verified filenames. On November 25,
   the CDN returned explicit access-denied pages for several 2026 Summer League filenames previously verified as
-  reachable. The remaining July 2026 publication slots await verification. The local evidence folder retains the
+  reachable. Capture now stops contacting the NBA PDF origin for that run when it returns this access-denied page
+  or HTTP 429. Daily refresh can publish already retrieved PDFs and continue with the schedule and rosters.
+  The remaining July 2026 publication slots await verification. The local evidence folder retains the
   exact URLs, response bodies and digests alongside the earlier valid PDFs.
   [2022 Summer League schedule](https://www.nba.com/news/2022-nba-summer-league-schedules-las-vegas-san-francisco-and-salt-lake-city)
   [2026 Summer League schedule](https://www.nba.com/news/2026-nba-summer-league-schedule)
@@ -375,6 +377,15 @@ access restrictions establish only that the requested route could not be checked
   retrieval provenance. The capture spans December 17, 2018 through November 25, 2026.
   [NBA report source](https://www.nba.com/players/injury-report)
   [Mirror build and selection rules](https://github.com/llimllib/nba_data/blob/main/pipeline/injury_report.py)
+- Jock Landale was the only player in the November 25 audit whose NBA injury report named one team and whose only
+  official game record was with the opponent. Utah listed him as out with a trade pending in 80 reports. Atlanta announced his
+  acquisition from Utah at 10:30 a.m. Eastern on February 5, 2026, and Utah's 12:15 p.m. Eastern announcement confirmed
+  the trade. The Utah injury entry disappeared at 1 p.m. and was absent from both final reports. Landale played for
+  Atlanta. The historical snapshots preserve his printed team and identity, and the final view joins participation
+  on the exact game, player and team.
+  [Atlanta acquisition](https://www.nba.com/hawks/news/atlanta-hawks-acquire-center-jock-landale)
+  [Utah confirmation](https://www.nba.com/jazz/news/utah-jazz-acquire-lonzo-ball-and-two-future-second-round-draft-picks)
+  [Utah game recap](https://www.nba.com/jazz/news/utah-jazz-fall-at-the-buzzer-to-atlanta-hawks-three-takeaways)
 - The roster mirror exposes actual capture timestamps in its current-season raw files. The initial import covers
   November 5–25, 2026 across all 30 teams. Historical opening-night lists and date-only transaction evidence are useful
   anchors with limited intraday resolution. Schedule captures are versioned so an earlier cutoff still sees the original
@@ -406,13 +417,18 @@ access restrictions establish only that the requested route could not be checked
   [NBA schedule by date](https://ak-static.cms.nba.com/wp-content/uploads/sites/46/2024/08/2024-25-NBA-Regular-Season-Schedule-By-Date.pdf)
   [NBA schedules by team](https://pr.nba.com/wp-content/uploads/sites/46/2024/08/2024-25-NBA-Regular-Season-Schedule-By-Team.pdf)
 - The original Pinnacle source dictionary does not specify timezone or quote publication time. Its dashboard groups the
-  field as first and last seen. `betting.pinnacle_match_review` retains ambiguous links, unmatched rows and disagreements
+  field as first and last seen by matchup text, which can span several events. A publisher capture of the Pinnacle
+  browsing interface shows a GMT header clock. Pinnacle documents that the website timezone is configurable.
+  The capture contains no quote timestamps or fixture IDs, and no public producer source connects its header clock
+  to the export's `snapshot_ts` field. `betting.pinnacle_match_review` retains ambiguous links, unmatched rows and disagreements
   with the publisher crosswalk. Timestamped Kaggle feeds can enter the pregame views only for verified fixture links and
   reported times strictly before tip-off, including when the publisher labels a quote as a close. Six sampled exact event
   URLs served identical page shells without fixture metadata. Wayback Availability and CDX returned successful empty
   results for all 65 unresolved main-line event URLs. The local evidence folder retains each response and its digest.
   [Publisher dictionary](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/csv/nba/data_dictionary.csv#L364-L401)
   [Publisher dashboard](https://github.com/nickth3man/basketball-data-index/blob/6e577d63bc4cc3a34c296a7b3d7ad42ef98c31a1/projects/db-viz/pages/09_Odds_and_Betting.py#L61-L98)
+  [Publisher's Pinnacle interface capture](https://github.com/nickth3man/basketball-data-index/blob/f3963e4eba37bfd86b8552c14d349b9766c5276c/html/debug_page.html#L79)
+  [Pinnacle timezone settings](https://support.pinnacle.com/hc/en-us/articles/42376057586321-How-do-I-change-the-Time-Zone-on-the-website)
   [Sample Pinnacle event](https://www.pinnacle.com/en/basketball/nba/usa-stars-vs-usa-stripes/1624285681/)
 - The two Kaggle NBA sample exports encode the same UTC fixture and quote times as text and typed timestamps.
   Interpreting both fixture fields as UTC before converting to the NBA game date restored 1,700,111 fixture links in

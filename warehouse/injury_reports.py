@@ -12,6 +12,8 @@ import xml.etree.ElementTree as ETxml
 from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import astuple, dataclass, replace
+from html import unescape
+from http.client import HTTPException
 from itertools import groupby
 from pathlib import Path
 from threading import Lock
@@ -45,6 +47,25 @@ class ReportRow:
     player_name: str | None
     status: str
     reason: str
+
+
+class InjurySourceBlocked(OSError):
+    pass
+
+
+class OfficialPdfSource:
+    def __init__(self):
+        self.blocked: str | None = None
+        self.lock = Lock()
+
+    def fetch(self, path: Path, recent: bool = False) -> None:
+        # Serialize requests to this origin so a block also stops queued downloads.
+        with self.lock:
+            if self.blocked is None:
+                try:
+                    download(NBA + path.name, path, recent=recent)
+                except InjurySourceBlocked as error:
+                    self.blocked = str(error)
 
 
 def physical_lines(document: bytes):
@@ -171,6 +192,24 @@ def download(url: str, dest: Path, recent: bool = False) -> None:
             raise ValueError(f'unexpected document format: {url}')
         cache_bytes(dest, body)
     except HTTPError as e:
+        if url.startswith(NBA):
+            if e.code == 429:
+                raise InjurySourceBlocked(f'NBA stopped injury PDF access (HTTP 429): {url}') from e
+            if e.code == 403:
+                try:
+                    with e:
+                        body = e.read(4096)
+                except (OSError, ValueError, HTTPException) as error:
+                    raise InjurySourceBlocked(f'NBA injury PDF access returned an unreadable HTTP 403: {url}') from error
+                if 'failover-waf.nba.com' in unescape(body.decode('utf-8', errors='replace')).lower():
+                    raise InjurySourceBlocked(f'NBA stopped injury PDF access (HTTP 403, WAF): {url}') from e
+                try:
+                    error = ETxml.fromstring(body)
+                    object_missing = error.tag == 'Error' and error.findtext('Code') in {'AccessDenied', 'NoSuchKey'}
+                except (ETxml.ParseError, LookupError, ValueError):
+                    object_missing = False
+                if not object_missing:
+                    raise InjurySourceBlocked(f'NBA injury PDF access returned an unclassified HTTP 403: {url}') from e
         # The static NBA CDN returns AccessDenied on nonexistent report objects.
         if dest.suffix != '.pdf' or e.code not in (403, 404):
             raise
@@ -180,22 +219,21 @@ def download(url: str, dest: Path, recent: bool = False) -> None:
         time.sleep(1)
 
 
-def capture_days(days, now: dt.datetime, workers: int = 1) -> list[Path]:
+def capture_days(days, now: dt.datetime, source: OfficialPdfSource | None = None) -> list[Path]:
     live_window = now.date() - dt.timedelta(days=1)
-
-    def capture(slot):
-        stamp, name = slot
-        target = CACHE / 'pdf' / name
-        download(NBA + name, target, recent=stamp.date() >= live_window)
-        return target if target.is_file() else None
-
+    source = source if source is not None else OfficialPdfSource()
     saved = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for day in sorted(set(days)):
-            batch = (slot for slot in slots(day) if slot[0] <= now)
-            reports = [path for path in pool.map(capture, batch) if path is not None]
-            saved.extend(reports)
-            print(f'NBA injury report capture {day}: {len(reports)} PDFs', flush=True)
+    for day in sorted(set(days)):
+        reports = []
+        for stamp, name in slots(day):
+            if stamp > now:
+                continue
+            target = CACHE / 'pdf' / name
+            source.fetch(target, recent=stamp.date() >= live_window)
+            if target.is_file():
+                reports.append(target)
+        saved.extend(reports)
+        print(f'NBA injury report capture {day}: {len(reports)} PDFs', flush=True)
     return saved
 
 
@@ -270,9 +308,17 @@ def publish(c, reports: dict, mirror: list[Path] | None = None, pregame=None) ->
         raise
 
 
-def capture_daily(now: dt.datetime) -> dict:
-    paths = capture_days([now.date() - dt.timedelta(days=1), now.date()], now)
-    return {path: read_pdf(path) for path in paths}
+def capture_daily(now: dt.datetime) -> tuple[dict, list[str]]:
+    source = OfficialPdfSource()
+    paths = capture_days([now.date() - dt.timedelta(days=1), now.date()], now, source)
+    errors = [source.blocked] if source.blocked else []
+    reports = {}
+    for path in paths:
+        try:
+            reports[path] = read_pdf(path)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            errors.append(f'Held injury report {retrieval_url(path)}: {error}')
+    return reports, errors
 
 
 def indexed_pdfs(warehouse: Path, start: dt.date, end: dt.date, cached_only: bool) -> bool:
@@ -371,11 +417,12 @@ def replay_cached_pdfs(warehouse: Path, start: dt.date, end: dt.date) -> bool:
 def archive_pdfs(warehouse: Path, catalog: Path, start: dt.date, end: dt.date) -> bool:
     entries = archive_entries(catalog, start, end)
     ordered = sorted(entries.items(), key=lambda item: (item[1][0], item[0]), reverse=True)
+    source = OfficialPdfSource()
     imported = failures = 0
     with ThreadPoolExecutor(max_workers=3) as pool:
         for (year, week), batch in groupby(ordered, key=lambda entry: entry[1][0].isocalendar()[:2]):
             reports = {}
-            for result in pool.map(load_archive_entry, batch):
+            for result in pool.map(lambda entry: load_archive_entry(entry, source), batch):
                 if result is None:
                     failures += 1
                 else:
@@ -387,10 +434,12 @@ def archive_pdfs(warehouse: Path, catalog: Path, start: dt.date, end: dt.date) -
                 imported += len(reports)
                 print(f'Published {len(reports)} original injury PDFs for ISO week {year}-{week:02}', flush=True)
     print(f'Published {imported} of {len(entries)} catalogued injury PDFs; {failures} require another check', flush=True)
+    if source.blocked:
+        print(source.blocked, flush=True)
     return failures == 0
 
 
-def load_archive_entry(entry):
+def load_archive_entry(entry, source: OfficialPdfSource):
     name, (_, capture, season, has_mirror) = entry
     primary = CACHE / 'pdf' / name
     mirrored = CACHE / 'pdf-mirror' / str(season) / name
@@ -405,7 +454,9 @@ def load_archive_entry(entry):
     for path in candidates:
         try:
             url = retrieval_url(path)
-            if path.parent.parent == CACHE / 'pdf-wayback':
+            if path == primary:
+                source.fetch(path)
+            elif path.parent.parent == CACHE / 'pdf-wayback':
                 with ARCHIVE_REPLAY_LOCK:
                     download(url, path)
             else:
@@ -434,6 +485,7 @@ def main() -> None:
     now = dt.datetime.now(ET)
     mirrors = []
     pregame = None
+    capture_errors = []
     if args.mode == 'mirror':
         last_season = now.year + (now.month >= 7)
         for season in range(2019, last_season + 1):
@@ -445,8 +497,11 @@ def main() -> None:
             mirrors.append(target)
         reports = {}
     elif args.mode == 'daily':
-        reports = capture_daily(now)
-        pregame = pregame_sources.capture(now)
+        reports, capture_errors = capture_daily(now)
+        try:
+            pregame = pregame_sources.capture(now)
+        except (OSError, ValueError) as error:
+            capture_errors.append(f'pregame schedule or roster capture failed: {error}')
     elif args.mode == 'rosters':
         reports = {}
         pregame = pregame_sources.capture(now, history=True)
@@ -466,9 +521,10 @@ def main() -> None:
         # Reports also include the following day's games.
         days = {day for (game_day,) in dates for day in (game_day, game_day - dt.timedelta(days=1)) if day >= args.from_date}
         total = held = 0
+        source = OfficialPdfSource()
         for (year, month), batch in groupby(sorted(days), key=lambda day: (day.year, day.month)):
             reports = {}
-            for path in capture_days(batch, now, workers=3):
+            for path in capture_days(batch, now, source):
                 try:
                     reports[path] = read_pdf(path)
                 except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -478,11 +534,16 @@ def main() -> None:
                 publish(c, reports)
             total += len(reports)
             print(f'Published {len(reports)} injury reports for {year}-{month:02}', flush=True)
+            if source.blocked:
+                print(source.blocked, flush=True)
+                break
         print(f'Published {total} NBA injury reports in the requested range. {held} require another check.', flush=True)
-        raise SystemExit(1 if held else 0)
+        raise SystemExit(int(bool(held or source.blocked)))
     with warehouse_lock(), connect(args.warehouse) as c:
         publish(c, reports, mirrors, pregame)
     print(f'Published source data from {len(reports)} NBA PDFs and {len(mirrors)} season files', flush=True)
+    if capture_errors:
+        raise SystemExit('\n'.join(capture_errors))
 
 
 if __name__ == '__main__':

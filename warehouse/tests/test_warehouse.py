@@ -128,7 +128,7 @@ def test_daily_pregame_capture_is_published_when_game_assets_are_late(warehouse,
     monkeypatch.setattr(daily_refresh, 'ROOT', tmp_path)
     monkeypatch.setattr(daily_refresh, 'REPORTS', tmp_path / 'data' / 'reports')
     monkeypatch.setattr(daily_refresh, 'warehouse_lock', nullcontext)
-    monkeypatch.setattr(daily_refresh, 'capture_daily', lambda now: {'report': object()})
+    monkeypatch.setattr(daily_refresh, 'capture_daily', lambda now: ({'report': object()}, []))
     monkeypatch.setattr(daily_refresh.pregame_sources, 'capture', lambda now: None)
 
     def publish(c, reports, pregame=None):
@@ -145,6 +145,25 @@ def test_daily_pregame_capture_is_published_when_game_assets_are_late(warehouse,
     with duckdb.connect(str(warehouse), read_only=True) as c:
         assert c.execute('SELECT captured FROM raw.pregame_capture').fetchone() == (1,)
         assert c.execute('SELECT count(*) FROM core.fact_game_result').fetchone() == (1,)
+
+
+def test_daily_publishes_partial_injury_capture_and_surfaces_source_block(warehouse, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, 'argv', ['daily_refresh.py', '--warehouse', str(warehouse), '--cutoff', '2026-11-20'])
+    monkeypatch.setattr(daily_refresh, 'REPORTS', tmp_path)
+    monkeypatch.setattr(daily_refresh, 'warehouse_lock', nullcontext)
+    monkeypatch.setattr(daily_refresh, 'capture_daily', lambda now: ({'report': object()}, ['NBA source block']))
+    monkeypatch.setattr(daily_refresh.pregame_sources, 'capture', lambda now: 'roster')
+
+    def publish(c, reports, pregame=None):
+        assert list(reports) == ['report']
+        assert pregame == 'roster'
+        c.execute('CREATE TABLE raw.pregame_capture AS SELECT 1 AS captured')
+
+    monkeypatch.setattr(daily_refresh, 'publish_injury_reports', publish)
+    assert daily_refresh.main() == 1
+    assert 'NBA source block' in capsys.readouterr().err
+    with duckdb.connect(str(warehouse), read_only=True) as c:
+        assert c.execute('SELECT captured FROM raw.pregame_capture').fetchone() == (1,)
 
 
 # ----------------------------------------------------------------------------------------- gap chasing
