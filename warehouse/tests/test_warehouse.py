@@ -33,9 +33,11 @@ CREATE TABLE core.bridge_game_team (game_id VARCHAR, side VARCHAR, team_id BIGIN
 CREATE TABLE core.fact_game_result (game_id VARCHAR PRIMARY KEY, home_score INT, away_score INT, winner_team_id BIGINT);
 CREATE TABLE core.fact_game_period_score (game_id VARCHAR, team_id BIGINT, period_number SMALLINT, points INT);
 CREATE TABLE core.fact_team_game_stats (game_id VARCHAR, team_id BIGINT, pts INT);
-CREATE TABLE core.fact_player_game_stats (game_id VARCHAR, person_id BIGINT, team_id BIGINT, points INT);
+CREATE TABLE core.fact_player_game_stats (game_id VARCHAR, person_id BIGINT, team_id BIGINT, points INT,
+    PRIMARY KEY (game_id, person_id));
 CREATE TABLE core.fact_play_event (game_id VARCHAR, action_number INT);
-CREATE TABLE core.fact_shot (game_id VARCHAR, shot_key VARCHAR);
+CREATE TABLE core.fact_shot (game_id VARCHAR, shot_key VARCHAR, person_id BIGINT,
+    FOREIGN KEY (game_id, person_id) REFERENCES core.fact_player_game_stats (game_id, person_id));
 CREATE TABLE core.fact_regular_standings (season_year VARCHAR, team_id BIGINT, games INT, wins INT, losses INT,
     points_for INT, points_against INT, snapshot_kind VARCHAR, as_of_date DATE);
 """
@@ -107,6 +109,18 @@ def test_refresh_commits_a_valid_snapshot(warehouse: Path, tmp_path: Path) -> No
     assert not (tmp_path / 'wh_refresh.duckdb').exists()
 
 
+def test_refresh_preserves_shot_references_when_player_stats_change(warehouse: Path, tmp_path: Path) -> None:
+    with duckdb.connect(str(warehouse)) as c:
+        c.execute("INSERT INTO core.fact_shot VALUES ('0022600001', 'shot1', 1)")
+    refreshed = snapshot(tmp_path, HOME)
+    with duckdb.connect(str(refreshed)) as c:
+        c.execute("UPDATE nba.fact_player_game_stats SET points = 22 WHERE game_id = '0022600001'")
+    daily_refresh.merge(warehouse, refreshed, dt.date(2026, 11, 21), dt.datetime.now(dt.timezone.utc), tmp_path)
+    with duckdb.connect(str(warehouse), read_only=True) as c:
+        assert c.execute('''SELECT s.shot_key, p.points FROM core.fact_shot s
+            JOIN core.fact_player_game_stats p USING (game_id, person_id)''').fetchall() == [('shot1', 22)]
+
+
 def test_refresh_rejects_bad_winner_and_leaves_file_unchanged(warehouse: Path, tmp_path: Path) -> None:
     before = digest(warehouse)
     with pytest.raises(RuntimeError, match='winner outside the fixture'):
@@ -123,6 +137,25 @@ def test_refresh_rejects_a_disappearing_final(warehouse: Path, tmp_path: Path) -
     assert digest(warehouse) == before
 
 
+def test_same_day_refresh_retry_captures_new_publisher_assets(tmp_path, monkeypatch):
+    monkeypatch.setattr(daily_refresh, 'EVIDENCE', tmp_path)
+    attempts = []
+
+    def capture_assets(command):
+        destination = Path(command[-1])
+        destination.mkdir()
+        (destination / f'shots_{daily_refresh.SEASON_END}.parquet').write_text(str(len(attempts)))
+        attempts.append(destination)
+
+    monkeypatch.setattr(daily_refresh, 'run', capture_assets)
+    cutoff = dt.date(2026, 11, 24)
+    early, late = (daily_refresh.capture(cutoff, dt.datetime(2026, 11, 25, hour, tzinfo=daily_refresh.ET))
+                   for hour in (6, 9))
+    assert attempts == [early, late] and early != late
+    assert [(path / f'shots_{daily_refresh.SEASON_END}.parquet').read_text()
+            for path in attempts] == ['0', '1']
+
+
 def test_daily_pregame_capture_is_published_when_game_assets_are_late(warehouse, tmp_path, monkeypatch):
     monkeypatch.setattr(sys, 'argv', ['daily_refresh.py', '--warehouse', str(warehouse), '--cutoff', '2026-11-21'])
     monkeypatch.setattr(daily_refresh, 'ROOT', tmp_path)
@@ -135,7 +168,7 @@ def test_daily_pregame_capture_is_published_when_game_assets_are_late(warehouse,
         assert list(reports) == ['report']
         c.execute('CREATE TABLE raw.pregame_capture AS SELECT 1 AS captured')
 
-    def late(cutoff):
+    def late(cutoff, started_at):
         raise daily_refresh.NotReady('publisher assets do not yet cover the cutoff')
 
     monkeypatch.setattr(daily_refresh, 'publish_injury_reports', publish)

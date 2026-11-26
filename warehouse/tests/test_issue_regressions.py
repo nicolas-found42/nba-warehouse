@@ -236,6 +236,61 @@ def test_injury_archive_preserves_source_ordinal_and_tracks_original_coverage(mo
         ReportRow(dt.date(2026, 7, 9), 'DET@ORL', 'Detroit Pistons', 'One, Player', 'Out', '')])})
     assert c.execute('SELECT DISTINCT original_pdf_status FROM audit.injury_report_archive_copy').fetchall() == [
         ('original_present',)]
+    c.execute('''INSERT INTO raw.sportsdataverse_nba_injury_archive
+        (source_url, source_sha256, source_row_number, report_datetime, game_date, report_matchup, team,
+         report_player_name, current_status, reason, game_id, team_id, person_id)
+        VALUES
+        ('archive','archive-digest',0,'2026-07-09 17:00','2026-07-09','DET@ORL','Detroit Pistons',
+          'One, Player','Questionable','Knee','0022600001',1,3),
+        ('archive','archive-digest',1,'2026-07-09 20:00','2026-07-09','DET@ORL','Detroit Pistons',
+          'One, Player','Available',NULL,'0022600001',1,3)''')
+
+    def as_of(cutoff):
+        return c.execute('''SELECT source, person_id, status FROM core.injury_report_at('0022600001', ?::TIMESTAMPTZ)''',
+                         [f'2026-07-09 {cutoff}:00-04']).fetchall()
+
+    assert as_of('16:59') == [('nba_official_pdf', None, 'Out')]
+    assert as_of('17:00') == [('sportsdataverse', None, 'Questionable')]
+    assert c.execute('SELECT source, person_id, status, participation_status FROM core.injury_report_final_pregame').fetchall() == [
+        ('sportsdataverse', 3, 'Questionable', 'played')]
+    c.execute('''INSERT INTO raw.nba_roster_capture VALUES
+        (1,3,'Player One',NULL,NULL,'2026-07-09','2026-07-09 17:00:00-04','roster','archive-roster');
+        INSERT INTO raw.nba_roster_publication VALUES
+        ('roster','archive-roster','2026-07-09 17:15:00-04','fixture');''')
+    assert as_of('17:14') == [('sportsdataverse', None, 'Questionable')]
+    assert as_of('17:15') == [('sportsdataverse', 3, 'Questionable')]
+    assert as_of('20:30') == [('sportsdataverse', 3, 'Questionable')]
+    c.execute('''INSERT INTO raw.nba_injury_report_mirror VALUES
+        (2026,'2026-07-09 17:00:00-04','0022600001','2026-07-09','1','3','Probable',NULL,NULL,'mirror')''')
+    assert as_of('20:30') == [('llimllib_nba_injury', 3, 'Probable')]
+    publish(c, {Path('third-fixture.pdf'): ('third-fixture', dt.datetime(2026, 7, 9, 17, tzinfo=ET), [
+        ReportRow(dt.date(2026, 7, 9), 'DET@ORL', 'Detroit Pistons', 'One, Player', 'Doubtful', '')])})
+    assert as_of('20:30') == [('nba_official_pdf', 3, 'Doubtful')]
+    c.execute('''INSERT INTO core.dim_game VALUES ('0022600002','2026-07-09',1,2,'2026-07-09 21:00','resolved','final');
+        INSERT INTO raw.sportsdataverse_nba_injury_archive
+        (source_url, source_sha256, source_row_number, report_datetime, game_date, report_matchup, team,
+         report_player_name, current_status, game_id, team_id, person_id)
+        VALUES
+        ('archive','archive-digest',2,'2026-07-09 17:30','2026-07-09','DET@ORL','Detroit Pistons',
+          'One, Player','Out',NULL,1,3),
+        ('archive','archive-digest',3,'2026-07-09 18:00','2026-07-09','DET@ORL','Detroit Pistons',
+          'One, Player','Out','0022600001',1,3),
+        ('archive','archive-digest',4,'2026-07-09 18:30','2026-07-09','DET@ORL','Detroit Pistons',
+          'One, Player','Out','0022600001',1,3),
+        ('archive','archive-digest',5,'2026-07-09 18:30','2026-07-09','DET@ORL','Detroit',
+          'One, Player','Available','0022600001',1,3)''')
+    assert as_of('17:30') == [('nba_official_pdf', 3, 'Doubtful')]
+    assert as_of('18:00') == [('nba_official_pdf', 3, 'Doubtful')]
+    c.execute("DELETE FROM core.dim_game WHERE game_id = '0022600002'")
+    c.execute('''INSERT INTO raw.nba_initial_schedule VALUES
+        ('0022600002','2026-07-09','2026-07-09 21:00:00-04',2,1,'initial','2026-07-08 00:00:00-04','schedule')''')
+    assert as_of('17:30') == [('nba_official_pdf', 3, 'Doubtful')]
+    c.execute("DELETE FROM raw.nba_initial_schedule WHERE game_id = '0022600002'")
+    assert as_of('18:00') == [('sportsdataverse', 3, 'Out')]
+    assert as_of('18:30') == [('sportsdataverse', 3, 'Out')]
+    assert c.execute('''SELECT row_number FROM core.injury_report_snapshot
+        WHERE game_id='0022600001' AND source='sportsdataverse' AND report_time < tipoff_at
+        ORDER BY row_number''').fetchall() == [(2,), (3,)]
 
 
 def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():

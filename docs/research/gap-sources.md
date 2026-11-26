@@ -377,6 +377,10 @@ access restrictions establish only that the requested route could not be checked
   publisher URL, SHA-256 and row position and keeps the publisher's candidate IDs in the raw rows.
   `audit.injury_report_archive_resolution` corroborates 38,064 named rows and 7,598 team notices against warehouse
   fixtures. It holds 12,910 names and 1,522 rows for which it cannot corroborate a fixture.
+  The pregame queries use archive team snapshots with one source version, an unambiguous Eastern timestamp, a
+  unique fixture and complete statuses. Official PDFs and the season mirror take precedence. Archived person IDs
+  are corroborated through the roster known at the cutoff for point-in-time queries. Final reconciliation uses
+  game participation and official inactive evidence.
   [SportsDataverse release](https://github.com/sportsdataverse/sportsdataverse-data/releases/tag/nba_stats_injury_report)
   [Publisher PDF timestamp parser](https://github.com/sportsdataverse/sportsdataverse-py/blob/0013f41b4b28ed9104f37917dc56cf89e5183c13/sportsdataverse/nba/nba_official_injury.py#L198)
 - The NBA's daily Summer League game indexes provide official IDs for the 82 distinct matchups in the July 2026

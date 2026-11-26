@@ -44,8 +44,7 @@ def publish(c, paths: list[Path], summer_schedule: Path | None = None) -> None:
         FROM read_parquet(?, file_row_number = true)'''
     c.execute('BEGIN')
     try:
-        c.execute(f'''CREATE TABLE IF NOT EXISTS raw.sportsdataverse_nba_injury_archive AS
-            {source_rows} LIMIT 0''', sources[0])
+        c.execute(Path(__file__).with_name('injury_reports.sql').read_text())
         for url, digest, path in sources:
             c.execute(f'''INSERT INTO raw.sportsdataverse_nba_injury_archive BY NAME
                 {source_rows}

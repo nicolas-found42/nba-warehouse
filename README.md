@@ -100,7 +100,9 @@ Install both scheduled jobs with `warehouse/launchd/install.sh`.
 
 `warehouse/daily_refresh.py` runs at 06:00 Eastern (launchd, retried at 09:00 and 12:00). It loads
 the previous day's games, runs every check on a copy-on-write clone of the warehouse, and replaces
-the completed-game release only if all checks pass. Failures write a report to `data/refresh-reports/`.
+the completed-game release only if all checks pass. Each attempt captures a fresh publisher release.
+Independently published shot and event rows are carried through the game refresh. Failures write a report to
+`data/refresh-reports/`.
 The job also snapshots the day's referee assignments. It publishes NBA injury reports, upcoming fixtures and
 captured rosters even when the completed-game release is delayed.
 
@@ -141,6 +143,9 @@ Load verified [SportsDataverse release assets](https://github.com/sportsdatavers
 with `warehouse/load_injury_report_archive.py PATH [PATH ...]` using the same DuckDB runtime.
 `audit.injury_report_archive_copy` keeps the publisher's rows and identifies report times without a locally verified
 original PDF. `audit.injury_report_archive_resolution` corroborates fixture, team and player identities using warehouse game records.
+Pregame queries can use a SportsDataverse team snapshot at the original report's printed time when the
+original PDF and the seasonal mirror's corresponding team snapshot are unavailable. The cutoff query links
+archived names through rosters available at the requested cutoff.
 `--summer-schedule PATH` adds official Summer League game IDs to `audit.injury_report_summer_fixture`.
 Historical and daily source coverage is documented in the
 [research note](docs/research/gap-sources.md).

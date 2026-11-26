@@ -52,6 +52,9 @@ SEASON_TABLES = {
 }
 GAME_TABLES = ['bridge_game_team', 'fact_game_result', 'fact_game_period_score', 'fact_team_game_stats',
                'fact_player_game_stats', 'fact_play_event']
+# The current release does not generate these tables. Restore the season's rows in dependency order.
+PRESERVED_GAME_TABLES = ['bridge_event_fixture', 'fact_shot', 'fact_pbp_field_goal_attempt',
+                         'bridge_shot_event_source_v20', 'bridge_shot_event']
 UA = 'nba-warehouse-personal-refresh (local, low volume)'
 
 
@@ -96,10 +99,10 @@ def export_inputs(wh: Path, work: Path) -> tuple[Path, Path, Path]:
     return hist, prior, prev
 
 
-def capture(cutoff: dt.date) -> Path:
-    out = EVIDENCE / f'sdv-{SEASON_END}-{dt.date.today().isoformat()}-for-{cutoff.isoformat()}'
-    if not (out / f'shots_{SEASON_END}.parquet').exists():
-        run(PY + ['capture_current_assets.py', '--season-end', str(SEASON_END), '--output', str(out)])
+def capture(cutoff: dt.date, started_at: dt.datetime) -> Path:
+    stamp = started_at.astimezone(dt.timezone.utc).strftime('%Y-%m-%dT%H%M%S.%fZ')
+    out = EVIDENCE / f'sdv-{SEASON_END}-{stamp}-for-{cutoff.isoformat()}'
+    run(PY + ['capture_current_assets.py', '--season-end', str(SEASON_END), '--output', str(out)])
     return out
 
 
@@ -170,7 +173,13 @@ def merge(wh: Path, snap: Path, cutoff: dt.date, refs_captured: dt.datetime, wor
         season_games = f"(SELECT game_id FROM core.dim_game WHERE season_year = '{SEASON_YEAR}')"
         before = {t: c.execute(f'SELECT count(*) FROM core.{t} WHERE game_id IN {season_games}').fetchone()[0] for t in GAME_TABLES}
         old_finals = c.execute(f'SELECT * FROM core.fact_game_result WHERE game_id IN {season_games}').fetchall()
-        for t in reversed(GAME_TABLES):  # children first
+        tables = {t for (t,) in c.execute('''SELECT table_name FROM duckdb_tables()
+                    WHERE database_name = current_database() AND schema_name = 'core' ''').fetchall()}
+        preserved = [t for t in PRESERVED_GAME_TABLES if t in tables]
+        for t in reversed(preserved):
+            c.execute(f'CREATE TEMP TABLE {q(t)} AS SELECT * FROM core.{q(t)} WHERE game_id IN {season_games}')
+            c.execute(f'DELETE FROM core.{q(t)} WHERE game_id IN {season_games}')
+        for t in reversed(GAME_TABLES):
             c.execute(f'DELETE FROM core.{t} WHERE game_id IN {season_games}')
         c.execute(f'DELETE FROM core.fact_regular_standings WHERE season_year = {lit(SEASON_YEAR)}')
         c.execute(f'DELETE FROM core.dim_game WHERE season_year = {lit(SEASON_YEAR)}')
@@ -180,6 +189,8 @@ def merge(wh: Path, snap: Path, cutoff: dt.date, refs_captured: dt.datetime, wor
         c.execute('INSERT INTO core.dim_game SELECT * FROM snap.nba.dim_game')
         for t in GAME_TABLES:
             c.execute(f'INSERT INTO core.{t} SELECT * FROM snap.nba.{t}')
+        for t in preserved:
+            c.execute(f'INSERT INTO core.{q(t)} SELECT * FROM temp.main.{q(t)}')
         c.execute(f"INSERT INTO core.fact_regular_standings SELECT *, 'as_of', DATE {lit(cutoff.isoformat())} FROM snap.nba.fact_regular_standings")
         for (t,) in c.execute("SELECT table_name FROM duckdb_tables() WHERE database_name='snap' AND schema_name='audit'").fetchall():
             c.execute(f'CREATE OR REPLACE TABLE audit.{q(PREFIX + t)} AS SELECT * FROM snap.audit.{q(t)}')
@@ -247,7 +258,7 @@ def main() -> int:
         # hold the writers' lock for the whole run: export, rebuild, clone, swap (gap chasing waits)
         with warehouse_lock(), tempfile.TemporaryDirectory(dir=ROOT / 'data', prefix='.refresh-') as w:
             work = Path(w)
-            assets = capture(cutoff)
+            assets = capture(cutoff, now)
             hist, prior, prev = export_inputs(a.warehouse, work)
             snap = work / 'snapshot.duckdb'
             build_snapshot(assets, cutoff, hist, prior, prev, snap)
