@@ -215,14 +215,23 @@ def test_injury_archive_preserves_source_ordinal_and_tracks_original_coverage(mo
         TO ? (FORMAT parquet)''', [str(archive)])
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     monkeypatch.setattr(load_injury_report_archive, 'ARCHIVE_SEASONS', {digest: 2026})
+    schedule = tmp_path / 'schedule.csv'
+    schedule.write_text('game_id,game_date,away_abbr,home_abbr,source_url,source_sha256,game_url\n'
+                        '1522600001,2026-07-09,DET,ORL,daily-index,capture-digest,official-game\n')
+    schedule_digest = hashlib.sha256(schedule.read_bytes()).hexdigest()
+    monkeypatch.setattr(load_injury_report_archive, 'SUMMER_SCHEDULE_SHA256', schedule_digest)
     for _ in range(2):
-        load_injury_report_archive.publish(c, [archive])
+        load_injury_report_archive.publish(c, [archive], schedule)
     assert c.execute('''SELECT source_sha256, count(*), count(DISTINCT source_row_number)
         FROM audit.injury_report_archive_copy GROUP BY ALL''').fetchall() == [(digest, 5, 5)]
     assert c.execute('''SELECT resolution_status, resolved_game_id, resolved_team_id, resolved_person_id
         FROM audit.injury_report_archive_resolution ORDER BY source_row_number''').fetchall() == [
         ('linked', '0022600001', 1, 3), ('player_unresolved', '0022600001', 1, None),
         ('team_unresolved', '0022600001', None, None), ('team_notice', '0022600001', 1, None)]
+    assert c.execute('''SELECT report_source, official_game_id, schedule_capture_sha256, count(*)
+        FROM audit.injury_report_summer_fixture GROUP BY ALL ORDER BY 1''').fetchall() == [
+        ('nba_official_pdf', '1522600001', 'capture-digest', 1),
+        ('sportsdataverse', '1522600001', 'capture-digest', 4)]
     publish(c, {Path('second-fixture.pdf'): ('second-fixture', dt.datetime(2026, 7, 9, tzinfo=ET), [
         ReportRow(dt.date(2026, 7, 9), 'DET@ORL', 'Detroit Pistons', 'One, Player', 'Out', '')])})
     assert c.execute('SELECT DISTINCT original_pdf_status FROM audit.injury_report_archive_copy').fetchall() == [

@@ -20,11 +20,16 @@ ARCHIVE_SEASONS = {
     'c81116b17c0059c70d3592a83b8869b34aa5e56c9a5072628ab31c828ab501fa': 2026,
     '4164ea57a2ace2f5f414d01f4e1caad5e76cf99a75da1bb56a71c7e71de98c9e': 2027,
 }
+SUMMER_SCHEDULE_SHA256 = '8f4d0264597dd94fe097b97c5065d29fbb7e458703752160340c478f767100aa'
 
 
-def publish(c, paths: list[Path]) -> None:
+def publish(c, paths: list[Path], summer_schedule: Path | None = None) -> None:
     if not paths:
         raise ValueError('provide at least one SportsDataverse release asset')
+    if summer_schedule is not None:
+        with summer_schedule.open('rb') as manifest:
+            if hashlib.file_digest(manifest, 'sha256').hexdigest() != SUMMER_SCHEDULE_SHA256:
+                raise ValueError('the Summer League schedule manifest differs from the verified capture')
     sources = []
     for path in paths:
         with path.open('rb') as archive:
@@ -46,6 +51,13 @@ def publish(c, paths: list[Path]) -> None:
                 {source_rows}
                 WHERE NOT EXISTS (SELECT 1 FROM raw.sportsdataverse_nba_injury_archive WHERE source_sha256 = ?)''',
                 [url, digest, path, digest])
+        c.execute('''CREATE TABLE IF NOT EXISTS raw.nba_summer_league_injury_schedule (
+            game_id VARCHAR PRIMARY KEY, game_date DATE, away_abbr VARCHAR, home_abbr VARCHAR,
+            source_url VARCHAR, source_sha256 VARCHAR, game_url VARCHAR)''')
+        if summer_schedule is not None:
+            c.execute('''INSERT INTO raw.nba_summer_league_injury_schedule BY NAME
+                SELECT game_id, game_date, away_abbr, home_abbr, source_url, source_sha256, game_url
+                FROM read_csv(?, all_varchar = true) ON CONFLICT DO NOTHING''', [str(summer_schedule)])
         c.execute(Path(__file__).with_suffix('.sql').read_text())
         c.execute('COMMIT')
     except BaseException:
@@ -56,10 +68,11 @@ def publish(c, paths: list[Path]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('archive', nargs='+', type=Path, help='local copies of verified SportsDataverse Parquet release assets')
+    parser.add_argument('--summer-schedule', type=Path, help='local verified NBA Summer League schedule manifest')
     parser.add_argument('--warehouse', type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
     with warehouse_lock(), connect(args.warehouse) as c:
-        publish(c, args.archive)
+        publish(c, args.archive, args.summer_schedule)
         for status, stamps, rows in c.execute('''SELECT original_pdf_status, count(DISTINCT report_datetime), count(*)
                 FROM audit.injury_report_archive_copy GROUP BY ALL ORDER BY 1''').fetchall():
             print(f'{status}: {stamps} report times and {rows} source rows')

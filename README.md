@@ -141,6 +141,7 @@ Load verified [SportsDataverse release assets](https://github.com/sportsdatavers
 with `warehouse/load_injury_report_archive.py PATH [PATH ...]` using the same DuckDB runtime.
 `audit.injury_report_archive_copy` keeps the publisher's rows and identifies report times without a locally verified
 original PDF. `audit.injury_report_archive_resolution` corroborates fixture, team and player identities using warehouse game records.
+`--summer-schedule PATH` adds official Summer League game IDs to `audit.injury_report_summer_fixture`.
 Historical and daily source coverage is documented in the
 [research note](docs/research/gap-sources.md).
 

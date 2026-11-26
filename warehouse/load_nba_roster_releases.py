@@ -85,6 +85,13 @@ RELEASES = (
                   'ROSTERS SET FOR 2023-24 NBA REGULAR SEASON',
                   ('opening-followup/league-2023-roster-release-rows.csv',
                    '4b388a186ec2a44b77a7dd6447a2fa3aa37b53f1cd11a4aa487e798b87af7673', 525)),
+    RosterRelease('opening-followup/league-2025-press-mirror.pdf', 'f08c3a17be3504d608a6ae3bf83686546184582a645c16dad981e235de025109',
+                  'https://bloximages.chicago2.vip.townnews.com/tucson.com/content/tncms/assets/v3/editorial/4/ff/4ff8d6d8-1df5-4f17-aadb-dacba08d7860/68f6d1c879bf0.pdf.pdf',
+                  'https://tucson.com/nba-opening-rosters-2025-26/pdf_4ff8d6d8-1df5-4f17-aadb-dacba08d7860.html',
+                  dt.datetime.fromisoformat('2025-10-21T00:20:24Z'), dt.date(2025, 10, 21), 30,
+                  'ROSTERS SET FOR 2025-26 NBA REGULAR SEASON',
+                  ('opening-followup/league-2025-roster-release-rows.csv',
+                   '2dfb5018c7ca887564f945c52ac05268a5eb6d5cf53ea2077f282bd3e16bea37', 522)),
 )
 
 

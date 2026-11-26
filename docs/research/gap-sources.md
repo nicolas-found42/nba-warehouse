@@ -375,6 +375,12 @@ access restrictions establish only that the requested route could not be checked
   fixtures. It holds 12,910 names and 1,522 rows for which it cannot corroborate a fixture.
   [SportsDataverse release](https://github.com/sportsdataverse/sportsdataverse-data/releases/tag/nba_stats_injury_report)
   [Publisher PDF timestamp parser](https://github.com/sportsdataverse/sportsdataverse-py/blob/0013f41b4b28ed9104f37917dc56cf89e5183c13/sportsdataverse/nba/nba_official_injury.py#L198)
+- The NBA's daily Summer League game indexes provide official IDs for the 82 distinct matchups in the July 2026
+  SportsDataverse notices. The audit matches exact game date and designated away and home teams. It attaches NBA
+  game IDs to all 340 independently transcribed notices at missing PDF times and to 1,682 rows from cached NBA PDFs.
+  The published daily index receipts and game links support `audit.injury_report_summer_fixture`.
+  [July 4 game index](https://www.nba.com/games?date=2026-07-04)
+  [July 9 game index](https://www.nba.com/games?date=2026-07-09)
 
 - The NBA PDF cache keeps printed timestamps, statuses and notices. The season mirror covers 2019–2027 and contains
   selected pregame snapshots. Strict pregame queries corroborate identities with the roster available at the cutoff.
@@ -414,6 +420,11 @@ access restrictions establish only that the requested route could not be checked
   [2021 original roster PDF](https://s3.amazonaws.com/ukathletics.com/documents/2021/10/19/2021_22_Opening_Day_Rosters_10_18_21.pdf)
   [2022 release](https://pr.nba.com/rosters-set-for-2022-23-nba-regular-season/)
   [2023 PDF publication](https://thisistucson.com/nba-opening-rosters-2023-24/pdf_b52fd976-71ff-11ee-8fbf-d7479459d4aa.html)
+- The NBA's 2025–26 opening-roster release covers all 30 teams and 522 names. The warehouse linked 498 to player
+  IDs. The local audit keeps all printed names and statuses. The exact attachment was available by October 20 at
+  8:20:24 p.m. Eastern. The opening-night Houston–Oklahoma City roster query returns each team's 17 matched names
+  at that timestamp, with zero rows at the preceding second.
+  [2025 PDF publication](https://tucson.com/nba-opening-rosters-2025-26/pdf_4ff8d6d8-1df5-4f17-aadb-dacba08d7860.html)
 - The NBA’s original 2021–22 through 2025–26 by-date schedules and its 2020–21 second-half release link by
   exact date and designated teams. The 2021–22 release marks 19 games as pending a tip time. The 2020–21 second-half
   release marks 21. Their times remain unknown in the as-of fixture view until a later dated schedule supplies them.
