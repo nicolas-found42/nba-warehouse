@@ -49,6 +49,10 @@ RELEASES = (
                     'https://pr.nba.com/wp-content/uploads/sites/46/2025/08/2025-26-NBA-Regular-Season-Schedule-By-Date-8-14-25.pdf',
                     '98a06493d0a107cc410853ad230e67d48858777a2baf76ac77d089cbeaf2435d',
                     dt.datetime.fromisoformat('2025-08-15T04:00:00Z'), 'AUGUST 14, 2025', 1200),
+    ScheduleRelease('2026-27', 'opening-followup/schedule-2026-by-date-official.pdf',
+                    'https://cdn.nba.com/manage/2026/08/2026-27-NBA-Regular-Season-Schedule-By-Date.pdf',
+                    '5e82e37ef1b19e226dee57be69958b95b5694516280d3034aa7c1d64292b3570',
+                    dt.datetime.fromisoformat('2026-08-13T19:13:47Z'), 'AUGUST 13, 2026', 1200),
 )
 TEAM_LABELS = '|'.join(map(re.escape, sorted((*TEAM_IDS, 'L.A. LAKERS', 'L.A. CLIPPERS'), key=len, reverse=True)))
 CLOCK = r'(?:\d{1,2}:\d{2}\s+[AP]M|TBD)'
@@ -85,6 +89,8 @@ def parse_schedule(layout: str, release: ScheduleRelease) -> list[tuple[dt.date,
 
 def load(c) -> None:
     rows, audit, conflicts = [], [], []
+    has_schedule_capture = c.execute("""SELECT EXISTS (SELECT 1 FROM information_schema.views
+        WHERE table_schema = 'core' AND table_name = 'pregame_fixture')""").fetchone()[0]
     for release in RELEASES:
         path = CACHE / release.filename
         if not path.is_file():
@@ -98,6 +104,11 @@ def load(c) -> None:
         for gid, day, away, home in c.execute('''SELECT game_id,game_date,away_team_id,home_team_id FROM core.dim_game
             WHERE season_year=? AND season_type='Regular' AND participant_status='resolved' ''', [release.season]).fetchall():
             fixtures[day, away, home].append(gid)
+        if has_schedule_capture:
+            for gid, day, away, home in c.execute('''SELECT game_id,game_date,away_team_id,home_team_id
+                FROM core.pregame_fixture WHERE fixture_source='nba_schedule_mirror' AND starts_with(game_id, ?)''',
+                                                 [f'002{release.season[2:4]}']).fetchall():
+                fixtures[day, away, home].append(gid)
         for game_date, tip, away, home in published:
             candidates = fixtures[game_date, away, home]
             gid = candidates[0] if len(candidates) == 1 else None

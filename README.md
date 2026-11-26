@@ -112,7 +112,7 @@ schedule entries ahead of the results refresh. `core.injury_report_final_pregame
 status and any official inactive list entry. The as-of injury query links identities through rosters available at that cutoff.
 `audit.injury_report_resolution` records rows still missing a verified game, team or person match.
 `core.pregame_fixture_at(game_id, cutoff)` uses versioned schedule captures and the original NBA schedule releases
-for 2021–22 through 2025–26 and the second half of 2020–21. Entries with an unresolved fixture or tip time
+for 2021–22 through 2026–27 and the second half of 2020–21. Entries with an unresolved fixture or tip time
 remain in `audit.nba_initial_schedule_resolution`.
 
 `betting.price_pair` covers full-game moneyline, spread and totals. It exposes decimal prices, implied probabilities,

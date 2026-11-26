@@ -420,22 +420,36 @@ access restrictions establish only that the requested route could not be checked
   [2021 original roster PDF](https://s3.amazonaws.com/ukathletics.com/documents/2021/10/19/2021_22_Opening_Day_Rosters_10_18_21.pdf)
   [2022 release](https://pr.nba.com/rosters-set-for-2022-23-nba-regular-season/)
   [2023 PDF publication](https://thisistucson.com/nba-opening-rosters-2023-24/pdf_b52fd976-71ff-11ee-8fbf-d7479459d4aa.html)
+- NBA Communications published the complete 2024–25 opening roster on October 21, 2024. The three original
+  graphics cover 30 teams with 522 printed names and 495 linked player IDs. The verified roster cutoff is
+  6:15:10 p.m. Eastern on October 21. One Toronto entry has an ambiguous printed contract mark and stays in the
+  printed inactive-or-two-way category.
+  [2024 NBA Communications roster release](https://x.com/NBAPR/status/1848488220805198060)
 - The NBA's 2025–26 opening-roster release covers all 30 teams and 522 names. The warehouse linked 498 to player
   IDs. The local audit keeps all printed names and statuses. The exact attachment was available by October 20 at
   8:20:24 p.m. Eastern. The opening-night Houston–Oklahoma City roster query returns each team's 17 matched names
   at that timestamp, with zero rows at the preceding second.
   [2025 PDF publication](https://tucson.com/nba-opening-rosters-2025-26/pdf_4ff8d6d8-1df5-4f17-aadb-dacba08d7860.html)
-- The NBA’s original 2021–22 through 2025–26 by-date schedules and its 2020–21 second-half release link by
+- NBA Communications' 2026–27 opening roster shows 518 names across 30 teams. The Milwaukee Bucks published a
+  complete 18-player revision at 11:36:56 p.m. Eastern on October 19 after announcing Pete Nance's two-way signing.
+  The latest opening snapshots together have 519 names and 493 linked player IDs. The warehouse uses the complete
+  Milwaukee roster from its table publication time, 5 minutes and 20 seconds after the signing announcement.
+  [2026 NBA Communications roster release](https://x.com/NBAPR/status/2112301822576865466)
+  [Milwaukee's finalized roster](https://www.nba.com/bucks/news/milwaukee-bucks-finalize-2026-27-opening-night-roster)
+- The NBA’s original 2021–22 through 2026–27 by-date schedules and its 2020–21 second-half release link by
   exact date and designated teams. The 2021–22 release marks 19 games as pending a tip time. The 2020–21 second-half
   release marks 21. Their times remain unknown in the as-of fixture view until a later dated schedule supplies them.
   The end of the NBA’s published day bounds the 2022 and 2025 releases. Injury and roster
   observations must also predate the recorded tip when a completed game started earlier than originally scheduled.
+  The 2026–27 by-date PDF was publicly linked by 3:13:47 p.m. Eastern on August 13. Its 1,200 games all match the
+  warehouse fixture identities, and both teams' separately published schedules corroborate every tip time.
   [2021 schedule release](https://pr.nba.com/2021-22-nba-schedule-75th-anniversary-season/)
   [2020–21 second-half schedule release](https://pr.nba.com/2020-21-nba-second-half-schedule/)
   [2022 original schedule](https://pr.nba.com/wp-content/uploads/sites/46/2022/08/2022-23-NBA-Schedule-By-Date-8-17-22.pdf)
   [2023 schedule release](https://pr.nba.com/2023-24-nba-regular-season-schedule/)
   [2024 schedule release](https://pr.nba.com/2024-25-nba-regular-season-schedule)
   [2025 schedule release](https://pr.nba.com/2025-26-nba-regular-season-schedule)
+  [2026 schedule release](https://www.nba.com/news/2026-27-schedule-team-by-team-index)
 - Cleveland at Milwaukee on March 9, 2025 has two different tips in the original August 15 schedule package.
   The by-date PDF lists 7 p.m. Eastern and both team schedules list 8 p.m. Eastern. The as-of fixture keeps
   the dated matchup with an unknown tip. `audit.nba_initial_schedule_tip_conflict` retains both values and the source PDFs.
