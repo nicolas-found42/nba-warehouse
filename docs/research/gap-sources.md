@@ -365,6 +365,10 @@ access restrictions establish only that the requested route could not be checked
   [2022 Summer League schedule](https://www.nba.com/news/2022-nba-summer-league-schedules-las-vegas-san-francisco-and-salt-lake-city)
   [2026 Summer League schedule](https://www.nba.com/news/2026-nba-summer-league-schedule)
   [Verified July 17 original](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-07-17_11_30AM.pdf)
+- The Common Crawl index recorded three already verified July 8, 2026 originals with payload digests that match
+  the local PDFs. A July prefix query and an exact query for the July 17 12:15 a.m. filename both returned
+  HTTP 504. Coverage of that missing filename and the other July dates remains unverified through Common Crawl.
+  [Common Crawl collection listing](https://index.commoncrawl.org/collinfo.json)
 - Nine SportsDataverse release assets for ending seasons 2019–2027 contain 1,376,456 rows at 14,259 report times.
   The local original PDFs corroborate 13,447 times using their printed Eastern timestamps. The additional 812 times
   contribute 60,094 rows of parsed evidence in `audit.injury_report_archive_copy`. They include 17 distinct July 2026
