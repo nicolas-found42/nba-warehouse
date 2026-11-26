@@ -40,6 +40,37 @@ def test_injury_pdf_coordinates_survive_page_breaks_and_keep_team_notices():
                     ReportRow(published.date(), 'DET@ORL', 'Orlando Magic', None, 'NOT YET SUBMITTED', '')]
 
 
+def test_injury_pdf_preserves_reason_before_first_player_and_across_pages():
+    def line(y, words):
+        return ''.join(f'<word xMin="{x}" yMin="{y}">{word}</word>' for x, word in words)
+
+    header = [(10, 'Game'), (24, 'Date'), (70, 'Game'), (85, 'Time'), (125, 'Matchup'), (169, 'Team'),
+              (290, 'Player'), (320, 'Name'), (450, 'Current'), (481, 'Status'), (540, 'Reason')]
+    stamp = [(99, 'Injury'), (120, 'Report:'), (180, '11/24/26'), (220, '06:00'), (255, 'PM')]
+    match = [(11, '11/24/2026'), (71, '07:00'), (126, 'DET@ORL'), (170, 'Detroit'), (210, 'Pistons')]
+    footer = [(400, 'Page'), (420, '1'), (428, 'of'), (438, '2')]
+    first = (line(38, stamp) + line(104, header) + line(127, [(541, 'Right'), (570, 'Hamstring;')])
+             + line(134, match + [(291, 'First,'), (332, 'Player'), (451, 'Out')])
+             + line(141, [(541, 'Strain')])
+             + line(495, [(291, 'Last,'), (332, 'Player'), (451, 'Out'), (541, 'Left'), (570, 'Ankle;')])
+             + line(536, footer))
+    second = (line(38, stamp) + line(78, [(541, 'Inflammation')])
+              + line(100, [(541, 'Left'), (570, 'Toe;')])
+              + line(107, [(291, 'Next,'), (332, 'Player'), (451, 'Out')])
+              + line(115, [(541, 'Injury')])
+              + line(495, [(291, 'Another,'), (332, 'Player'), (451, 'Out'), (541, 'Soreness')])
+              + line(536, footer))
+    third = (line(38, stamp) + line(78, [(169, 'Another'), (211, 'Team'), (541, 'Unrelated')])
+             + line(500, [(541, 'Unrelated'), (582, 'Footer')]))
+    _, reports = parse_report(f'<doc><page>{first}</page><page>{second}</page><page>{third}</page></doc>'.encode())
+    assert [(row.player_name, row.reason) for row in reports] == [
+        ('First, Player', 'Right Hamstring; Strain'),
+        ('Last, Player', 'Left Ankle; Inflammation'),
+        ('Next, Player', 'Left Toe; Injury'),
+        ('Another, Player', 'Soreness'),
+    ]
+
+
 def test_injury_pdf_filename_transition_is_midday():
     friday = {stamp.strftime('%H:%M'): name for stamp, name in slots(dt.date(2025, 12, 19))}
     assert friday['15:30'] == 'Injury-Report_2025-12-19_03PM.pdf'
@@ -150,6 +181,52 @@ def test_daily_capture_keeps_valid_pdfs_when_one_is_malformed(monkeypatch):
     reports, errors = injury_reports.capture_daily(dt.datetime(2026, 11, 25, tzinfo=ET))
     assert reports == {valid: 'parsed report'}
     assert errors == ['NBA source block', f'Held injury report {injury_reports.NBA}{malformed}: invalid layout']
+
+
+def test_injury_archive_preserves_source_ordinal_and_tracks_original_coverage(monkeypatch, tmp_path):
+    import hashlib
+    import load_injury_report_archive
+
+    c = duckdb.connect()
+    c.execute('''CREATE SCHEMA raw; CREATE SCHEMA core; CREATE SCHEMA audit;
+        CREATE TABLE core.dim_team(team_id BIGINT, abbreviation VARCHAR, display_name VARCHAR);
+        INSERT INTO core.dim_team VALUES (1,'DET','Detroit Pistons'), (2,'ORL','Orlando Magic');
+        CREATE TABLE core.dim_team_version(team_id BIGINT, full_name VARCHAR);
+        CREATE TABLE core.dim_person(person_id BIGINT, display_name VARCHAR);
+        INSERT INTO core.dim_person VALUES (3, 'Player One'), (4, 'Player Two');
+        CREATE TABLE core.dim_game(game_id VARCHAR, game_date DATE, away_team_id BIGINT, home_team_id BIGINT,
+            game_datetime_est TIMESTAMP, participant_status VARCHAR, result_status VARCHAR);
+        INSERT INTO core.dim_game VALUES ('0022600001','2026-07-09',1,2,'2026-07-09 19:00','resolved','final');
+        CREATE TABLE core.fact_player_game_stats(game_id VARCHAR, team_id BIGINT, person_id BIGINT, participation_status VARCHAR);
+        INSERT INTO core.fact_player_game_stats VALUES ('0022600001',1,3,'played');
+        CREATE TABLE core.fact_inactive_player(game_id VARCHAR, team_id BIGINT, person_id BIGINT);''')
+    publish(c, {Path('fixture.pdf'): ('fixture', dt.datetime(2026, 7, 8, tzinfo=ET), [
+        ReportRow(dt.date(2026, 7, 9), 'DET@ORL', 'Detroit Pistons', 'One, Player', 'Questionable', '')])})
+    archive = tmp_path / 'release.parquet'
+    c.execute('''COPY (SELECT * FROM (VALUES
+        (TIMESTAMP '2026-07-08 00:00:00', 1, 'One, Player', 3, 'Questionable', NULL),
+        (TIMESTAMP '2026-07-09 00:00:00', 1, 'One, Player', 3, 'Out', NULL),
+        (TIMESTAMP '2026-07-09 00:00:00', 1, 'One, Player', 4, 'Out', NULL),
+        (TIMESTAMP '2026-07-09 00:00:00', 2, 'One, Player', 3, 'Out', NULL),
+        (TIMESTAMP '2026-07-09 00:00:00', 1, NULL, NULL, NULL, 'NOT YET SUBMITTED'))
+        AS items(report_datetime, team_id, report_player_name, person_id, current_status, reason)
+        CROSS JOIN (SELECT 2026 AS season, DATE '2026-07-09' AS game_date, 'DET@ORL' AS report_matchup,
+                           'Detroit Pistons' AS team, '0022600001' AS game_id))
+        TO ? (FORMAT parquet)''', [str(archive)])
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    monkeypatch.setattr(load_injury_report_archive, 'ARCHIVE_SEASONS', {digest: 2026})
+    for _ in range(2):
+        load_injury_report_archive.publish(c, [archive])
+    assert c.execute('''SELECT source_sha256, count(*), count(DISTINCT source_row_number)
+        FROM audit.injury_report_archive_copy GROUP BY ALL''').fetchall() == [(digest, 5, 5)]
+    assert c.execute('''SELECT resolution_status, resolved_game_id, resolved_team_id, resolved_person_id
+        FROM audit.injury_report_archive_resolution ORDER BY source_row_number''').fetchall() == [
+        ('linked', '0022600001', 1, 3), ('player_unresolved', '0022600001', 1, None),
+        ('team_unresolved', '0022600001', None, None), ('team_notice', '0022600001', 1, None)]
+    publish(c, {Path('second-fixture.pdf'): ('second-fixture', dt.datetime(2026, 7, 9, tzinfo=ET), [
+        ReportRow(dt.date(2026, 7, 9), 'DET@ORL', 'Detroit Pistons', 'One, Player', 'Out', '')])})
+    assert c.execute('SELECT DISTINCT original_pdf_status FROM audit.injury_report_archive_copy').fetchall() == [
+        ('original_present',)]
 
 
 def test_injury_as_of_uses_whole_latest_team_report_and_excludes_after_tip():

@@ -137,6 +137,10 @@ Official PDF capture uses Poppler's `pdftotext`. `indexed-pdfs` uses the downloa
 find original PDF filenames. `archive-pdfs --index PATH` accepts a local official and Wayback PDF catalogue.
 `audit-archive --index PATH` checks which catalogue filenames have parsed rows. `cached` replays downloaded
 originals, mirror copies and archive captures within the selected date range.
+Load verified [SportsDataverse release assets](https://github.com/sportsdataverse/sportsdataverse-data/releases/tag/nba_stats_injury_report)
+with `warehouse/load_injury_report_archive.py PATH [PATH ...]` using the same DuckDB runtime.
+`audit.injury_report_archive_copy` keeps the publisher's rows and identifies report times without a locally verified
+original PDF. `audit.injury_report_archive_resolution` corroborates fixture, team and player identities using warehouse game records.
 Historical and daily source coverage is documented in the
 [research note](docs/research/gap-sources.md).
 

@@ -5,12 +5,13 @@ import argparse
 import csv
 import datetime as dt
 import hashlib
+import os
 import re
 import subprocess
 import time
 import xml.etree.ElementTree as ETxml
 from bisect import bisect_right
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import astuple, dataclass, replace
 from html import unescape
 from http.client import HTTPException
@@ -37,6 +38,9 @@ STATUSES = {'Out', 'Doubtful', 'Questionable', 'Probable', 'Available'}
 TEAM_NOTES = {'NOT YET SUBMITTED', 'ALL PLAYERS AVAILABLE'}
 REPORT_FILE = re.compile(r'Injury-Report_(\d{4}-\d{2}-\d{2})_\d{2}(?:_\d{2})?[AP]M\.pdf')
 ARCHIVE_REPLAY_LOCK = Lock()
+REASON_LINE_DISTANCE = 20
+PAGE_END_WRAP_DISTANCE = 50
+PAGE_START_WRAP_DISTANCE = 50
 
 
 @dataclass(frozen=True)
@@ -90,8 +94,10 @@ def parse_report(document: bytes) -> tuple[dt.datetime, list[ReportRow]]:
     day = None
     matchup = team = ''
     rows = []
-    players_by_page: dict[int, list[tuple[float, int]]] = {}
-    reasons_by_page: dict[int, list[tuple[float, str]]] = {}
+    rows_by_page: dict[int, list[tuple[float, int]]] = {}
+    reasons_by_page: dict[int, list[tuple[float, str, bool]]] = {}
+    page_titles: dict[int, float] = {}
+    page_footers: dict[int, float] = {}
     for page, y, words in physical_lines(document):
         line = ' '.join(word for _, word in words)
         if 'Game Date' in line and 'Player Name' in line and 'Current Status' in line:
@@ -101,12 +107,17 @@ def parse_report(document: bytes) -> tuple[dt.datetime, list[ReportRow]]:
                              if tokens[i:i + len(label.split())] == label.split())
             continue
         stamp = re.search(r'Injury Report:\s*(\d{1,2}/\d{1,2}/\d{2}\s+\d{1,2}:\d{2}\s+[AP]M)', line)
-        if not line or stamp or re.fullmatch(r'Page \d+ of \d+', line):
-            if stamp:
-                time_value = dt.datetime.strptime(stamp[1], '%m/%d/%y %I:%M %p').replace(tzinfo=ET)
-                if published is not None and published != time_value:
-                    raise ValueError('pages have different injury report timestamps')
-                published = time_value
+        if stamp:
+            time_value = dt.datetime.strptime(stamp[1], '%m/%d/%y %I:%M %p').replace(tzinfo=ET)
+            if published is not None and published != time_value:
+                raise ValueError('pages have different injury report timestamps')
+            published = time_value
+            page_titles[page] = y
+            continue
+        if re.fullmatch(r'Page \d+ of \d+', line):
+            page_footers[page] = y
+            continue
+        if not line:
             continue
         if not columns:
             continue
@@ -125,27 +136,43 @@ def parse_report(document: bytes) -> tuple[dt.datetime, list[ReportRow]]:
             team = cells['Team']
         player, status = cells['Player Name'], cells['Current Status']
         reason = ' '.join(cell for cell in (cells.get('Category'), cells['Reason']) if cell and cell != '-')
+        note = next((value for value in TEAM_NOTES if value in line), None)
+        if reason and not player and not status and not note:
+            can_continue_previous_page = not any(cells[label] for label in ('Game Date', 'Matchup', 'Team'))
+            reasons_by_page.setdefault(page, []).append((y, reason, can_continue_previous_page))
         if not day or not matchup or not team:
             continue
         if status in STATUSES and ',' in player:
-            players_by_page.setdefault(page, []).append((y, len(rows)))
+            rows_by_page.setdefault(page, []).append((y, len(rows)))
             rows.append(ReportRow(day, matchup, team, player, status, ''))
             if reason:
-                reasons_by_page.setdefault(page, []).append((y, reason))
-        elif (note := next((n for n in TEAM_NOTES if n in line), None)):
+                reasons_by_page.setdefault(page, []).append((y, reason, False))
+        elif note:
+            rows_by_page.setdefault(page, []).append((y, len(rows)))
             rows.append(ReportRow(day, matchup, team, None, note, ''))
-        elif reason and not player and not status:
-            reasons_by_page.setdefault(page, []).append((y, reason))
     if not published or not rows:
         raise ValueError('no recognized report timestamp or rows')
     for page, fragments in reasons_by_page.items():
-        anchors = players_by_page.get(page, [])
-        for y, fragment in fragments:
+        page_rows = rows_by_page.get(page, [])
+        anchors = [(y, index) for y, index in page_rows if rows[index].player_name]
+        previous_rows = rows_by_page.get(page - 1, [])
+        for y, fragment, can_continue_previous_page in fragments:
             distances = sorted((abs(y - pos), index) for pos, index in anchors)
-            if distances and distances[0][0] <= 20 and (len(distances) == 1 or distances[0][0] < distances[1][0]):
+            if distances and distances[0][0] <= REASON_LINE_DISTANCE:
+                if len(distances) > 1 and distances[0][0] == distances[1][0]:
+                    continue
                 _, index = distances[0]
-                row = rows[index]
-                rows[index] = replace(row, reason=f'{row.reason} {fragment}'.strip())
+            elif (can_continue_previous_page and previous_rows and page in page_titles and page - 1 in page_footers
+                  and 0 <= y - page_titles[page] <= PAGE_START_WRAP_DISTANCE
+                  and (not page_rows or y < page_rows[0][0])):
+                # A leading fragment beyond the next row's wrap distance can complete the preceding page.
+                previous_y, index = previous_rows[-1]
+                if not (rows[index].reason and 0 <= page_footers[page - 1] - previous_y <= PAGE_END_WRAP_DISTANCE):
+                    continue
+            else:
+                continue
+            row = rows[index]
+            rows[index] = replace(row, reason=f'{row.reason} {fragment}'.strip())
     return published, rows
 
 
@@ -389,6 +416,13 @@ def audit_archive(warehouse: Path, catalog: Path, start: dt.date, end: dt.date) 
     return not missing
 
 
+def read_cached_report(path: Path):
+    try:
+        return path, read_pdf(path), None
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return path, None, str(error)
+
+
 def replay_cached_pdfs(warehouse: Path, start: dt.date, end: dt.date) -> bool:
     paths = [*CACHE.glob('pdf/*.pdf'), *CACHE.glob('pdf-mirror/*/*.pdf'), *CACHE.glob('pdf-wayback/*/*.pdf')]
     dates = []
@@ -397,19 +431,20 @@ def replay_cached_pdfs(warehouse: Path, start: dt.date, end: dt.date) -> bool:
         if match and start <= (day := dt.date.fromisoformat(match[1])) <= end:
             dates.append((day, path))
     held = total = 0
-    for (year, month), batch in groupby(sorted(dates), key=lambda item: (item[0].year, item[0].month)):
-        reports = {}
-        for _, path in batch:
-            try:
-                reports[path] = read_pdf(path)
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                held += 1
-                print(f'Held cached injury report {retrieval_url(path)}: {exc}', flush=True)
-        if reports:
-            with warehouse_lock(), connect(warehouse) as c:
-                publish(c, reports)
-            total += len(reports)
-            print(f'Replayed {len(reports)} cached PDF copies for {year}-{month:02}', flush=True)
+    with ProcessPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+        for (year, month), batch in groupby(sorted(dates), key=lambda item: (item[0].year, item[0].month)):
+            reports = {}
+            for path, document, error in pool.map(read_cached_report, (path for _, path in batch), chunksize=8):
+                if document is None:
+                    held += 1
+                    print(f'Held cached injury report {retrieval_url(path)}: {error}', flush=True)
+                else:
+                    reports[path] = document
+            if reports:
+                with warehouse_lock(), connect(warehouse) as c:
+                    publish(c, reports)
+                total += len(reports)
+                print(f'Replayed {len(reports)} cached PDF copies for {year}-{month:02}', flush=True)
     print(f'Replayed {total} cached PDF copies. {held} require another check.', flush=True)
     return held == 0
 

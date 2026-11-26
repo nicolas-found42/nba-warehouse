@@ -365,6 +365,16 @@ access restrictions establish only that the requested route could not be checked
   [2022 Summer League schedule](https://www.nba.com/news/2022-nba-summer-league-schedules-las-vegas-san-francisco-and-salt-lake-city)
   [2026 Summer League schedule](https://www.nba.com/news/2026-nba-summer-league-schedule)
   [Verified July 17 original](https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-07-17_11_30AM.pdf)
+- Nine SportsDataverse release assets for ending seasons 2019–2027 contain 1,376,456 rows at 14,259 report times.
+  The local original PDFs corroborate 13,447 times using their printed Eastern timestamps. The additional 812 times
+  contribute 60,094 rows of parsed evidence in `audit.injury_report_archive_copy`. They include 17 distinct July 2026
+  report times and 340 team notices. The assets contain no PDF bytes or original filename field. The two July 2026
+  reports with matching originals agree with all 18 published team-notice rows. The loader records each asset's
+  publisher URL, SHA-256 and row position and keeps the publisher's candidate IDs in the raw rows.
+  `audit.injury_report_archive_resolution` corroborates 38,064 named rows and 7,598 team notices against warehouse
+  fixtures. It holds 12,910 names and 1,522 rows for which it cannot corroborate a fixture.
+  [SportsDataverse release](https://github.com/sportsdataverse/sportsdataverse-data/releases/tag/nba_stats_injury_report)
+  [Publisher PDF timestamp parser](https://github.com/sportsdataverse/sportsdataverse-py/blob/0013f41b4b28ed9104f37917dc56cf89e5183c13/sportsdataverse/nba/nba_official_injury.py#L198)
 
 - The NBA PDF cache keeps printed timestamps, statuses and notices. The season mirror covers 2019–2027 and contains
   selected pregame snapshots. Strict pregame queries corroborate identities with the roster available at the cutoff.
@@ -377,6 +387,10 @@ access restrictions establish only that the requested route could not be checked
   retrieval provenance. The capture spans December 17, 2018 through November 25, 2026.
   [NBA report source](https://www.nba.com/players/injury-report)
   [Mirror build and selection rules](https://github.com/llimllib/nba_data/blob/main/pipeline/injury_report.py)
+- The PDF parser preserves injury reason text printed above a vertically centred player row and when a reason continues
+  on the next page. An original-PDF comparison preserved every row key on 308 sampled documents. All 38 changed
+  reason rows with an exact SportsDataverse counterpart agreed with its transcription after whitespace and punctuation
+  normalization. The same checks confirmed the four original files that exposed the omissions.
 - Jock Landale was the only player in the November 25 audit whose NBA injury report named one team and whose only
   official game record was with the opponent. Utah listed him as out with a trade pending in 80 reports. Atlanta announced his
   acquisition from Utah at 10:30 a.m. Eastern on February 5, 2026, and Utah's 12:15 p.m. Eastern announcement confirmed
