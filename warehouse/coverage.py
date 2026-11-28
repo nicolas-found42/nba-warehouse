@@ -19,6 +19,7 @@ import argparse
 from pathlib import Path
 
 from build_warehouse import DEFAULT_OUT, connect, warehouse_lock, warehouse_transaction
+from observability import operation
 
 # First season (season_start) each domain was recorded by the league, for NBA/BAA games.
 TRACKED_FROM = {
@@ -143,13 +144,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--output', type=Path, default=DEFAULT_OUT)
     a = ap.parse_args()
-    tracked = ', '.join(f"('{k}', {v})" for k, v in TRACKED_FROM.items())
-    with warehouse_lock(), connect(a.output) as c:
-        with warehouse_transaction(c):
-            c.execute(SQL.replace('{tracked}', tracked))
-        c.execute('CHECKPOINT')
-        for row in c.execute('''SELECT domain, status, sum(games) FROM audit.domain_coverage GROUP BY ALL ORDER BY 1, 2''').fetchall():
-            print(*row, sep='\t')
+    with operation('coverage', a.output):
+        tracked = ', '.join(f"('{k}', {v})" for k, v in TRACKED_FROM.items())
+        with warehouse_lock(), connect(a.output) as c:
+            with warehouse_transaction(c):
+                c.execute(SQL.replace('{tracked}', tracked))
+            c.execute('CHECKPOINT')
+            for row in c.execute('''SELECT domain, status, sum(games) FROM audit.domain_coverage GROUP BY ALL ORDER BY 1, 2''').fetchall():
+                print(*row, sep='\t')
 
 
 if __name__ == '__main__':

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from pathlib import Path
 
 from bref_fetch import BlockedError, NotFound, fetch
 
@@ -75,26 +76,33 @@ def aba_boxscores() -> None:
             print(i, p, flush=True)
 
 
-def aba_gamelogs() -> None:
+def aba_gamelogs(warehouse: Path | None = None) -> None:
     """One game-log page per ABA player-season (about 1,260 pages instead of 4,149 box pages); every game row of
     the season with the full box line. robots.txt disallows /gamelog/ paths; fetched on the owner's decision,
     at the same rate limit. Player-seasons come from the Kaggle ABA box rows already in the warehouse."""
     import duckdb
     from build_warehouse import DEFAULT_OUT
-    c = duckdb.connect(str(DEFAULT_OUT), read_only=True)
+    c = duckdb.connect(str(warehouse or DEFAULT_OUT), read_only=True)
     pairs = c.execute('''SELECT DISTINCT "Player Reference",
             CASE WHEN substr("Game Reference", 5, 2)::INT >= 8 THEN substr("Game Reference", 1, 4)::INT + 1
                  ELSE substr("Game Reference", 1, 4)::INT END AS season_end
         FROM raw_kaggle.gonzalo_aba_box WHERE regexp_full_match("Player Reference", '[a-z]+[0-9]{2}') ORDER BY 2, 1''').fetchall()
     c.close()
     print(len(pairs), 'ABA player game logs', flush=True)
-    for i, (pid, year) in enumerate(pairs):
-        try:
-            fetch(f'/players/{pid[0]}/{pid}/gamelog/{year}', ignore_robots=True)
-        except NotFound:
-            pass
-        if i % 50 == 0:
-            print(i, pid, year, flush=True)
+    from observability import event
+    completed = 0
+    missing = 0
+    try:
+        for i, (pid, year) in enumerate(pairs):
+            try:
+                fetch(f'/players/{pid[0]}/{pid}/gamelog/{year}', ignore_robots=True)
+            except NotFound:
+                missing += 1
+            completed += 1
+            if i % 50 == 0:
+                print(i, pid, year, flush=True)
+    finally:
+        event('aba_queue', 'progress', queued=len(pairs), count=completed, misses=missing)
 
 
 def partial_crews() -> None:

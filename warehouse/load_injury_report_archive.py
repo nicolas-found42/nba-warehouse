@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 
 from build_warehouse import DEFAULT_OUT, connect, warehouse_lock
+from observability import operation
 
 RELEASE_URL = ('https://github.com/sportsdataverse/sportsdataverse-data/releases/download/'
                'nba_stats_injury_report')
@@ -70,11 +71,12 @@ def main() -> None:
     parser.add_argument('--summer-schedule', type=Path, help='local verified NBA Summer League schedule manifest')
     parser.add_argument('--warehouse', type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
-    with warehouse_lock(), connect(args.warehouse) as c:
-        publish(c, args.archive, args.summer_schedule)
-        for status, stamps, rows in c.execute('''SELECT original_pdf_status, count(DISTINCT report_datetime), count(*)
-                FROM audit.injury_report_archive_copy GROUP BY ALL ORDER BY 1''').fetchall():
-            print(f'{status}: {stamps} report times and {rows} source rows')
+    with operation('load_injury_report_archive', args.warehouse):
+        with warehouse_lock(), connect(args.warehouse) as c:
+            publish(c, args.archive, args.summer_schedule)
+            for status, stamps, rows in c.execute('''SELECT original_pdf_status, count(DISTINCT report_datetime), count(*)
+                    FROM audit.injury_report_archive_copy GROUP BY ALL ORDER BY 1''').fetchall():
+                print(f'{status}: {stamps} report times and {rows} source rows')
 
 
 if __name__ == '__main__':

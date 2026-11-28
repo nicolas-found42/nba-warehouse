@@ -7,6 +7,7 @@ from pathlib import Path
 import duckdb
 
 from nba_warehouse import ROOT, sql_string
+from observability import operation, stage
 
 SEASON_TABLES = (
     'dim_season','dim_game','bridge_game_team','fact_game','fact_game_result','fact_game_period_score',
@@ -55,8 +56,11 @@ def main() -> None:
     p.add_argument('--current',type=Path,required=True)
     p.add_argument('query')
     a = p.parse_args()
-    with connect(a.history,a.current) as c:
-        c.sql(a.query).show(max_rows=40)
+    with operation('warehouse_query', a.current):
+        with stage('attach_snapshots'):
+            connection = connect(a.history,a.current)
+        with connection as c, stage('query'):
+            c.sql(a.query).show(max_rows=40)
 
 
 if __name__=='__main__':

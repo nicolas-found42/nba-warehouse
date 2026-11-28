@@ -22,6 +22,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.robotparser import RobotFileParser
 
+from observability import CURRENT, event
+
 ORIGIN = 'https://www.basketball-reference.com'
 AGENT = 'NBAWarehouse-Research/1.0 (personal historical data validation)'
 MIN_INTERVAL = 3.1
@@ -32,7 +34,9 @@ STAMP = CACHE / '.last_request'
 
 
 class BlockedError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class NotFound(RuntimeError):
@@ -63,9 +67,15 @@ def fetch(path: str, refresh: bool = False, ignore_robots: bool = False) -> str:
     ignore_robots skips the robots.txt path check (the owner's decision for player game-log pages); the rate
     limit and the stop-on-block rules still apply."""
     p = cache_path(path)
+    active = CURRENT.get()
+    period = active is not None and active.phase == 'period_attempt'
     if p.exists() and not refresh:
+        if period:
+            event('bref_cache', 'hit')
         return p.read_text('utf-8')
     if (p.with_suffix(p.suffix + '.404')).exists() and not refresh:
+        if period:
+            event('bref_cache', 'negative_hit')
         raise NotFound(path)
     if not ignore_robots and not robots().can_fetch(AGENT, ORIGIN + path):
         raise PermissionError(f'robots.txt disallows {path}')
@@ -83,8 +93,10 @@ def fetch(path: str, refresh: bool = False, ignore_robots: bool = False) -> str:
         except HTTPError as e:
             STAMP.write_text(str(time.time()))
             if e.code in (403, 429):
-                raise BlockedError(f'HTTP {e.code} on {path}; stopping all fetching') from e
+                raise BlockedError(f'HTTP {e.code} on {path}; stopping all fetching', e.code) from e
             if e.code == 404:
+                if period:
+                    event('bref_request', 'not_found', http_status=e.code)
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.with_suffix(p.suffix + '.404').write_text(time.strftime('%FT%TZ', time.gmtime()))
                 raise NotFound(path) from e
@@ -97,12 +109,14 @@ def fetch(path: str, refresh: bool = False, ignore_robots: bool = False) -> str:
         raise ValueError(f'response too large: {path}')
     text = body.decode('utf-8', 'replace')
     if status != 200 or 'challenge-platform' in text[:5000] or 'Just a moment' in text[:2000]:
-        raise BlockedError(f'challenge or status {status} on {path}')
+        raise BlockedError(f'challenge or status {status} on {path}', status)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, 'utf-8')
     meta = {'url': ORIGIN + path, 'sha256': hashlib.sha256(body).hexdigest(),
             'fetched_at': time.strftime('%FT%TZ', time.gmtime()), 'bytes': len(body)}
     p.with_suffix(p.suffix + '.json').write_text(json.dumps(meta))
+    if period:
+        event('bref_request', 'captured', http_status=status, sha256=meta['sha256'])
     return text
 
 

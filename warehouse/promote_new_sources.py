@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 
 from build_warehouse import DEFAULT_OUT, connect
+from observability import operation
 
 SYNTH_TEAM_BASE = 1690100000   # ABA-only teams: 1690100001, 1690100002, ...
 SYNTH_PERSON_BASE = 1680000000  # players absent from all NBA data: 1680000001, ... (900000001-2 are used upstream)
@@ -652,13 +653,14 @@ def main() -> None:
     ap.add_argument('parts', nargs='*', default=['identities', 'transactions', 'aba', 'salaries', 'tracking', 'rosters', 'views'])
     ap.add_argument('--output', type=Path, default=DEFAULT_OUT)
     a = ap.parse_args()
-    c = connect(a.output)
-    c.execute('''CREATE TABLE IF NOT EXISTS audit.domain_disposition (domain VARCHAR PRIMARY KEY, source VARCHAR,
-        source_rows BIGINT, published BIGINT, duplicate BIGINT, held BIGINT)''')
-    c.execute('CREATE TABLE IF NOT EXISTS audit.domain_held (domain VARCHAR, source_row BIGINT, reason VARCHAR, row_json JSON)')
-    for part in a.parts:
-        globals()[part](c)
-    c.execute('CHECKPOINT')
+    with operation('promote_new_sources', a.output):
+        c = connect(a.output)
+        c.execute('''CREATE TABLE IF NOT EXISTS audit.domain_disposition (domain VARCHAR PRIMARY KEY, source VARCHAR,
+            source_rows BIGINT, published BIGINT, duplicate BIGINT, held BIGINT)''')
+        c.execute('CREATE TABLE IF NOT EXISTS audit.domain_held (domain VARCHAR, source_row BIGINT, reason VARCHAR, row_json JSON)')
+        for part in a.parts:
+            globals()[part](c)
+        c.execute('CHECKPOINT')
 
 
 if __name__ == '__main__':

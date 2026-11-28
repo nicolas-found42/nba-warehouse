@@ -11,10 +11,15 @@ from __future__ import annotations
 import datetime as dt
 import html
 import json
+import os
 import re
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from observability import error_details, event, operation, stage
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'data'
@@ -45,7 +50,10 @@ def now() -> dt.datetime:
 
 
 def launchd(label: str) -> dict:
-    out = subprocess.run(['launchctl', 'list'], capture_output=True, text=True).stdout
+    result = subprocess.run(['launchctl', 'list'], capture_output=True, text=True)
+    if result.returncode:
+        event('scheduler_status', 'failed', reason='launchctl_exit', exit_code=result.returncode)
+    out = result.stdout
     for line in out.splitlines():
         parts = line.split('\t')
         if len(parts) == 3 and parts[2] == label:
@@ -58,12 +66,15 @@ def db_numbers(state: dict) -> dict:
     import time
     import duckdb
     c = None
-    for _ in range(6):  # a job may hold the file for a moment; try for ~30 s
+    for attempt in range(6):  # a job may hold the file for a moment; try for ~30 s
         try:
             c = duckdb.connect(str(DATA / 'nba-warehouse.duckdb'), read_only=True)
             break
-        except Exception:
-            time.sleep(5)
+        except duckdb.Error as error:
+            if attempt == 5:
+                event('status_database', 'unavailable', retries=attempt, **error_details(error))
+            else:
+                time.sleep(5)
     if c is None:
         return state.get('db', {}) | {'stale': True}
     q = lambda sql: c.execute(sql).fetchall()
@@ -76,25 +87,57 @@ def db_numbers(state: dict) -> dict:
         out['coverage_as_of'] = q("SELECT max(attempted_at)::VARCHAR FROM audit.gap_attempt")[0][0]
         out['filled_since'] = q('''SELECT count(*) FROM audit.period_receipt_bref_chase
             WHERE game_id IN (SELECT game_id FROM audit.game_coverage WHERE domain = 'period_scores' AND status <> 'present')''')[0][0]
-        out['refresh'] = [(str(r[0]), str(r[1]), r[2]) for r in q("SELECT ran_at::VARCHAR, cutoff, outcome FROM audit.refresh_log ORDER BY ran_at DESC LIMIT 5")]
+        has_refresh = q("SELECT count(*) FROM duckdb_tables() WHERE schema_name='audit' AND table_name='refresh_log'")[0][0]
+        out['refresh'] = q("SELECT ran_at::VARCHAR, cutoff::VARCHAR, outcome FROM audit.refresh_log ORDER BY ran_at DESC LIMIT 5") if has_refresh else []
         out['scope_cutoff'] = str(q('SELECT cutoff FROM audit."season_2027__scope"')[0][0])
         out['current_finals'] = q("SELECT count(*) FROM core.fact_game_result r JOIN core.dim_game g USING (game_id) WHERE g.season_year = '2026-27'")[0][0]
         has_aba_box = q("SELECT count(*) FROM duckdb_tables() WHERE schema_name='core' AND table_name='aba_player_game_stats'")[0][0]
         out['aba_box_games'] = q('SELECT count(DISTINCT game_id) FROM core.aba_player_game_stats')[0][0] if has_aba_box else 0
         out['aba_games'] = q('SELECT count(*) FROM core.aba_game')[0][0]
-    except Exception as e:
-        out['error'] = str(e)[:200]
+    except duckdb.Error as error:
+        event('status_database', 'failed', **error_details(error))
+        return state.get('db', {}) | {'stale': True}
     finally:
         c.close()
     return out
 
 
+def log_tail(path: Path) -> str:
+    """Status only needs recent progress. Avoid reading an unbounded legacy launch log."""
+    try:
+        with path.open('rb') as stream:
+            size = stream.seek(0, os.SEEK_END)
+            limit = 512 * 1024
+            stream.seek(max(0, size - limit))
+            if size > limit:
+                event('status_log', 'truncated', reason='tail_limit')
+                stream.readline(limit)
+            return stream.read(limit).decode(errors='replace')
+    except FileNotFoundError:
+        return ''
+
+
+def atomic_text(path: Path, content: str) -> None:
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, encoding='utf-8',
+                                     prefix=f'.{path.name}-', delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(content)
+            if path.is_file():
+                os.fchmod(stream.fileno(), stat.S_IMODE(path.stat().st_mode))
+            stream.close()
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def chase_log() -> dict:
     p = DATA / 'crawl-logs' / 'chase.log'
-    lines = p.read_text(errors='replace').splitlines() if p.exists() else []
+    lines = log_tail(p).splitlines()
     starts = [i for i, l in enumerate(lines) if l.endswith('period gaps queued')]
     if not starts:
-        return {'queued': None, 'done': 0, 'admitted': 0, 'recent': [], 'problem': None}
+        return {'queued': None, 'done': 0, 'admitted': 0, 'no_data': 0, 'mismatch': 0,
+                'recent': [], 'problem': None, 'aba_total_logged': None}
     run = lines[starts[-1]:]
     queued = int(run[0].split()[0])
     events = [l for l in run if re.match(r'^\d+ \d{10} ', l)]
@@ -113,7 +156,7 @@ def aba_pages() -> tuple[int, int]:
     for name in ('aba-gamelogs.log', 'chase.log'):
         p = DATA / 'crawl-logs' / name
         if p.exists():
-            m = re.findall(r'^(\d+) ABA player game logs$', p.read_text(errors='replace'), re.M)
+            m = re.findall(r'^(\d+) ABA player game logs$', log_tail(p), re.M)
             if m:
                 total = int(m[-1])
     return min(have, total), total
@@ -166,8 +209,9 @@ def latest_refresh_report() -> tuple[str, str] | None:
     files = sorted((DATA / 'refresh-reports').glob('*-cutoff-*.txt'))
     if not files:
         return None
-    f = files[-1]
-    first = f.read_text(errors='replace').splitlines()[0] if f.stat().st_size else ''
+    f = max(files, key=lambda path: (path.name[:15], path.stat().st_mtime_ns))
+    with f.open(encoding='utf-8', errors='replace') as stream:
+        first = stream.readline(4096).rstrip()
     stamp = dt.datetime.strptime(f.name[:15], '%Y-%m-%dT%H%M').replace(tzinfo=ET)
     return when(stamp) if stamp.date() >= now().date() - dt.timedelta(days=1) else stamp.strftime('%b %-d, %-I:%M %p'), first
 
@@ -175,17 +219,34 @@ def latest_refresh_report() -> tuple[str, str] | None:
 def build() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     state_file = OUT / 'history.json'
-    state = json.loads(state_file.read_text()) if state_file.exists() else {'samples': []}
-    db = db_numbers(state)
+    state = {'samples': []}
+    if state_file.exists():
+        try:
+            previous = json.loads(state_file.read_text())
+            if (not isinstance(previous, dict) or not isinstance(previous.get('samples'), list)
+                    or not isinstance(previous.get('db', {}), dict)):
+                raise ValueError('invalid status history shape')
+            previous['samples'] = [
+                sample for sample in previous['samples'][-299:]
+                if isinstance(sample, dict) and isinstance(sample.get('t'), (int, float))
+                and all(isinstance(value, (int, float)) for value in sample.values())
+            ]
+            state = previous
+        except ValueError:
+            event('status_history', 'recovered', reason='invalid_json')
+    with stage('status_database_read') as step:
+        db = db_numbers(state)
+        step.result.update(stale=db.get('stale', True), previous_cutoff=db.get('scope_cutoff'))
+        if db.get('stale'):
+            step.outcome = 'partial'
     if not db.get('stale'):
         state['db'] = db
     chase = chase_log()
     aba_have, aba_total = aba_pages()
     chase_job, refresh_job = launchd('com.nba-warehouse.chase-gaps'), launchd('com.nba-warehouse.daily-refresh')
     t = now().timestamp()
-    state['samples'] = [s for s in state['samples'] if t - s['t'] < 86400] + [
+    state['samples'] = [s for s in state['samples'][-299:] if t - s['t'] < 86400] + [
         {'t': t, 'period_done': chase['done'], 'aba_pages': aba_have}]
-    state_file.write_text(json.dumps(state))
 
     tasks = []
     # 1. quarter scores
@@ -232,7 +293,7 @@ def build() -> None:
         logf = DATA / 'crawl-logs' / f'nba-gaps-{kind}.log'
         if not logf.exists():
             continue
-        m = re.findall(r'^(\d+) \w+ games to fetch$', logf.read_text(errors='replace'), re.M)
+        m = re.findall(r'^(\d+) \w+ games to fetch$', log_tail(logf), re.M)
         total = int(m[0]) if m else 0
         done = sum(1 for _ in (EVIDENCE / 'nba-gaps' / folder).glob('*.json'))
         run = subprocess.run(['pgrep', '-f', f'fetch_nba_gaps.py {kind}'], capture_output=True).returncode == 0
@@ -302,7 +363,10 @@ def build() -> None:
     if chase['admitted']:
         happened.append((now().strftime('%Y-%m-%d'), f"Quarter-score job has filled in {chase['admitted']:,} old games so far."))
 
-    (OUT / 'index.html').write_text(render(tasks, coverage_rows, happened, db, chase, chase_job), 'utf-8')
+    with stage('status_history_write'):
+        atomic_text(state_file, json.dumps(state))
+    with stage('status_page_write'):
+        atomic_text(OUT / 'index.html', render(tasks, coverage_rows, happened, db, chase, chase_job))
 
 
 def pretty_date(s: str | None) -> str:
@@ -321,7 +385,7 @@ def plain_refresh(first_line: str) -> str:
     if first_line.startswith('already current'):
         return 'already up to date'
     if first_line.startswith('FAILED'):
-        return 'a check failed, so nothing was changed (see data/refresh-reports)'
+        return 'the refresh needs attention (see the operation history and refresh reports)'
     return first_line or 'no details'
 
 
@@ -475,4 +539,5 @@ footer {{ color: var(--muted); font-size: 14px }}
 
 
 if __name__ == '__main__':
-    build()
+    with operation('status_page', DATA / 'nba-warehouse.duckdb'):
+        build()

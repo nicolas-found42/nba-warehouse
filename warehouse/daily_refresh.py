@@ -25,7 +25,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import traceback
 from pathlib import Path
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -33,12 +32,12 @@ from zoneinfo import ZoneInfo
 import duckdb
 import pregame_sources
 
-from build_warehouse import DEFAULT_OUT, ROOT, connect, lit, q, warehouse_lock
+from build_warehouse import DEFAULT_OUT, ROOT, connect, lit, q, record_publication, warehouse_lock
 from injury_reports import capture_daily, publish as publish_injury_reports
+from observability import CURRENT, error_details, event, operation, stage
 
 ET = ZoneInfo('America/New_York')
 EVIDENCE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence'
-REPORTS = ROOT / 'data' / 'refresh-reports'
 WAREHOUSE_DIR = ROOT / 'warehouse'
 PY = [sys.executable]
 NOT_READY = 75
@@ -62,11 +61,13 @@ class NotReady(Exception):
     pass
 
 
-def run(cmd: list[str]) -> str:
-    r = subprocess.run(cmd, cwd=WAREHOUSE_DIR, capture_output=True, text=True)
-    if r.returncode:
-        raise RuntimeError(f'{" ".join(cmd[-6:])} failed:\n{r.stdout[-3000:]}\n{r.stderr[-3000:]}')
-    return r.stdout
+def run(cmd: list[str]) -> None:
+    active = CURRENT.get()
+    env = active.child_env() if active is not None else None
+    code = subprocess.run(cmd, cwd=WAREHOUSE_DIR, env=env,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+    if code:
+        raise subprocess.CalledProcessError(code, cmd)
 
 
 def export_inputs(wh: Path, work: Path) -> tuple[Path, Path, Path]:
@@ -112,8 +113,8 @@ def build_snapshot(assets: Path, cutoff: dt.date, hist: Path, prior: Path, prev:
             '--output', str(out)]
     try:
         run(PY + args)
-    except RuntimeError as e:
-        if 'Cutoff is not closed' in str(e) or 'predates the end of cutoff' in str(e):
+    except subprocess.CalledProcessError as e:
+        if e.returncode == NOT_READY:
             raise NotReady('publisher assets do not yet cover the cutoff') from e
         raise
 
@@ -166,7 +167,9 @@ def merge(wh: Path, snap: Path, cutoff: dt.date, refs_captured: dt.datetime, wor
     """Apply the snapshot to a clone; replace the warehouse only if every check passes."""
     clone = wh.with_name(wh.stem + '_refresh.duckdb')
     clone.unlink(missing_ok=True)
-    subprocess.run(['cp', '-c', str(wh), str(clone)], check=True)  # APFS clone: instant, no extra space
+    with stage('clone'):
+        subprocess.run(['cp', '-c', str(wh), str(clone)], check=True)  # APFS clone: instant, no extra space
+    c = None
     try:
         c = connect(clone)
         c.execute(f'ATTACH {lit(str(snap))} AS snap (READ_ONLY)')
@@ -194,8 +197,14 @@ def merge(wh: Path, snap: Path, cutoff: dt.date, refs_captured: dt.datetime, wor
         c.execute(f"INSERT INTO core.fact_regular_standings SELECT *, 'as_of', DATE {lit(cutoff.isoformat())} FROM snap.nba.fact_regular_standings")
         for (t,) in c.execute("SELECT table_name FROM duckdb_tables() WHERE database_name='snap' AND schema_name='audit'").fetchall():
             c.execute(f'CREATE OR REPLACE TABLE audit.{q(PREFIX + t)} AS SELECT * FROM snap.audit.{q(t)}')
-        refs = referee_assignments(c, refs_captured)
-        fails = integrity(c)
+        with stage('referee_capture', dependency='nba_official') as step:
+            refs = referee_assignments(c, refs_captured)
+            step.result['refs'] = refs
+        with stage('warehouse_integrity') as step:
+            fails = integrity(c)
+            step.result['errors'] = len(fails)
+            if fails:
+                step.outcome = 'failed'
         new_finals = set(c.execute(f'SELECT * FROM core.fact_game_result WHERE game_id IN {season_games}').fetchall())
         changed = [r for r in old_finals if r not in new_finals]
         if changed:
@@ -205,17 +214,25 @@ def merge(wh: Path, snap: Path, cutoff: dt.date, refs_captured: dt.datetime, wor
         if shrunk:
             fails.append(f'season row counts went down: {shrunk}')
         if fails:
+            event('publish_guard', 'failed', reason='integrity_checks', errors=len(fails))
+            for row in changed[:3]:
+                event('publish_guard', 'held', reason='previous_final_changed', game_id=row[0])
             raise RuntimeError('integrity checks failed: ' + '; '.join(fails))
         c.execute('''CREATE TABLE IF NOT EXISTS audit.refresh_log (ran_at TIMESTAMPTZ, cutoff DATE, outcome VARCHAR,
             rows_before JSON, rows_after JSON, referee_rows INTEGER, note VARCHAR)''')
         c.execute("INSERT INTO audit.refresh_log VALUES (now(), ?, 'committed', ?, ?, ?, NULL)",
                   [cutoff, json.dumps(before), json.dumps(after), refs])
-        c.execute('DETACH snap')
-        c.execute('CHECKPOINT')
-        c.close()
-        os.replace(clone, wh)
+        record_publication(c, 'completed_games')
+        with stage('checkpoint'):
+            c.execute('DETACH snap')
+            c.execute('CHECKPOINT')
+            c.close()
+        with stage('warehouse_replace'):
+            os.replace(clone, wh)
         return {'before': before, 'after': after, 'referee_rows': refs}
     finally:
+        if c is not None:
+            c.close()
         clone.unlink(missing_ok=True)
         Path(str(clone) + '.wal').unlink(missing_ok=True)
 
@@ -228,54 +245,95 @@ def main() -> int:
     a = ap.parse_args()
     now = dt.datetime.now(ET)
     cutoff = a.cutoff or (now.date() - dt.timedelta(days=1))
-    REPORTS.mkdir(parents=True, exist_ok=True)
-    report = REPORTS / f'{now:%Y-%m-%dT%H%M}-cutoff-{cutoff}.txt'
-    c = connect(a.warehouse, read_only=True)
-    done = c.execute(f'SELECT cutoff FROM audit."{PREFIX}scope"').fetchone()[0]
-    c.close()
-    injury_reports = {}
-    pregame = None
-    capture_errors = []
+    with operation('daily_refresh', a.warehouse, cutoff=cutoff.isoformat(), force=a.force) as run_span:
+        return refresh(a, now, cutoff, run_span)
+
+
+def write_report(report: Path, body: str) -> None:
     try:
-        injury_reports, injury_errors = capture_daily(now)
-        capture_errors.extend(injury_errors)
-    except (OSError, ValueError, subprocess.SubprocessError) as e:
-        capture_errors.append(f'injury report capture failed: {e}')
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(body)
+    except OSError as error:
+        event('legacy_report', 'failed', **error_details(error))
+    print(body.strip(), file=sys.stderr if body.startswith('FAILED') else sys.stdout, flush=True)
+
+
+def refresh(a, now: dt.datetime, cutoff: dt.date, run_span) -> int:
+    report = (a.warehouse.parent / 'refresh-reports' /
+              f'{now:%Y-%m-%dT%H%M}-cutoff-{cutoff}-{run_span.trace.run_id}.txt')
+    capture_errors = 0
+    commit = False
     try:
-        pregame = pregame_sources.capture(now)
-    except (OSError, ValueError) as e:
-        capture_errors.append(f'pregame schedule or roster capture failed: {e}')
-    for error in capture_errors:
-        print(error, file=sys.stderr)
-    try:
+        with stage('read_scope') as step:
+            with connect(a.warehouse, read_only=True) as c:
+                done = c.execute(f'SELECT cutoff FROM audit."{PREFIX}scope"').fetchone()[0]
+            step.result['previous_cutoff'] = done.isoformat()
+        injury_reports = {}
+        pregame = None
+        try:
+            with stage('injury_capture', dependency='nba_official') as step:
+                injury_reports, injury_errors = capture_daily(now)
+                capture_errors += len(injury_errors)
+                step.result.update(reports=len(injury_reports), errors=len(injury_errors))
+                if injury_errors:
+                    step.outcome = 'partial'
+                    print(f'NBA injury report capture partial ({len(injury_errors)} errors)', file=sys.stderr)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            capture_errors += 1
+            print('NBA injury report capture failed; see operation history', file=sys.stderr)
+        try:
+            with stage('pregame_capture', dependency='sportsdataverse'):
+                pregame = pregame_sources.capture(now)
+        except (OSError, ValueError):
+            capture_errors += 1
+            print('Pregame schedule or roster capture failed; see operation history', file=sys.stderr)
+
         if injury_reports or pregame:
-            with warehouse_lock(), connect(a.warehouse) as c:
-                publish_injury_reports(c, injury_reports, pregame=pregame)
+            with stage('pregame_publish', reports=len(injury_reports)) as step:
+                with warehouse_lock(), connect(a.warehouse) as c:
+                    publish_injury_reports(c, injury_reports, pregame=pregame)
+                step.result['decision'] = 'committed'
         print(f'pregame refresh: {len(injury_reports)} injury report PDFs available', flush=True)
+        run_span.result.update(errors=capture_errors, reports=len(injury_reports), previous_cutoff=done.isoformat())
         if done >= cutoff and not a.force:
-            print(f'game data already current through {done}')
+            run_span.outcome = 'partial' if capture_errors else 'skipped'
+            run_span.result['decision'] = 'already_current'
+            write_report(report, f'already current through {done}; capture errors: {capture_errors}\n')
             return int(bool(capture_errors))
-        # hold the writers' lock for the whole run: export, rebuild, clone, swap (gap chasing waits)
-        with warehouse_lock(), tempfile.TemporaryDirectory(dir=ROOT / 'data', prefix='.refresh-') as w:
+
+        with warehouse_lock(), tempfile.TemporaryDirectory(dir=a.warehouse.parent, prefix='.refresh-') as w:
             work = Path(w)
-            assets = capture(cutoff, now)
-            hist, prior, prev = export_inputs(a.warehouse, work)
+            with stage('release_capture', dependency='sportsdataverse') as step:
+                assets = capture(cutoff, now)
+                step.result['asset_set'] = assets.name
+            with stage('export_inputs'):
+                hist, prior, prev = export_inputs(a.warehouse, work)
             snap = work / 'snapshot.duckdb'
-            build_snapshot(assets, cutoff, hist, prior, prev, snap)
-            result = merge(a.warehouse, snap, cutoff, dt.datetime.now(dt.timezone.utc), work)
-        result['injury_reports'] = len(injury_reports)
-        if capture_errors:
-            result['capture_errors'] = capture_errors
-        report.write_text(f'committed cutoff {cutoff}\n{json.dumps(result, indent=2)}\n')
-        print(report.read_text())
+            with stage('release_build', asset_set=assets.name) as step:
+                try:
+                    build_snapshot(assets, cutoff, hist, prior, prev, snap)
+                except NotReady:
+                    step.outcome = 'deferred'
+                    step.result['reason'] = 'cutoff_not_ready'
+                    raise
+            with stage('merge', asset_set=assets.name):
+                result = merge(a.warehouse, snap, cutoff, dt.datetime.now(dt.timezone.utc), work)
+                commit = True
+        result.update(injury_reports=len(injury_reports), capture_errors=capture_errors)
+        run_span.outcome = 'partial' if capture_errors else 'succeeded'
+        run_span.result['decision'] = 'committed'
+        write_report(report, f'committed cutoff {cutoff}\n{json.dumps(result, indent=2)}\n')
         return int(bool(capture_errors))
-    except NotReady as e:
-        report.write_text(f'not ready: {e}\n')
-        print(f'not ready: {e}')
+    except NotReady:
+        run_span.outcome = 'deferred'
+        run_span.result.update(reason='cutoff_not_ready', decision='no_game_publication')
+        write_report(report, 'not ready: publisher assets do not yet cover the cutoff\n')
         return NOT_READY
-    except Exception:
-        report.write_text(f'FAILED, completed-game release unchanged (cutoff {cutoff})\n\n{traceback.format_exc()}')
-        print(report.read_text(), file=sys.stderr)
+    except Exception as error:
+        run_span.outcome = 'failed'
+        run_span.result.update(error_details(error))
+        run_span.result['decision'] = 'committed' if commit else 'check_publication_receipt'
+        write_report(report, f'FAILED refresh (cutoff {cutoff}, run {run_span.trace.run_id})\n')
         return 1
 
 

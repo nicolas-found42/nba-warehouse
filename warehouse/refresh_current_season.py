@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 import json
@@ -14,6 +15,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 from nba_warehouse import ROOT, WAREHOUSE, sql_string
+from observability import event, operation, stage
 from recover_archive_periods import sha256 as file_hash
 from recover_local_periods import difference, snapshot
 
@@ -85,15 +87,20 @@ def parse_periods(text: str, score: int, periods: int) -> list[int]:
     return points
 
 
-def check(c: duckdb.DuckDBPyConnection, name: str, sql: str) -> None:
-    rows = c.execute(sql).fetchmany(4)
+def check(c: duckdb.DuckDBPyConnection, name: str, sql: str, *, game_key: bool = False) -> None:
+    result = c.execute(sql)
+    rows = result.fetchmany(4)
     if rows:
+        has_diagnosis = result.description[-1][0] == 'diagnostic_code'
+        for row in rows:
+            event('release_validation', 'held', check=name, game_id=row[0] if game_key else None,
+                  decision=row[-1] if has_diagnosis else None, sample_rows=len(rows), sample_limited=len(rows) == 4)
         raise ValueError(f'{name}: {rows}')
 
 
 def key(c: duckdb.DuckDBPyConnection, table: str, fields: str) -> None:
-    check(c,table+' duplicate key',f'SELECT {fields}, count(*) FROM {table} GROUP BY {fields} HAVING count(*)<>1')
-    check(c,table+' null key',f'SELECT {fields} FROM {table} WHERE '+ ' OR '.join(f'{n.strip()} IS NULL' for n in fields.split(',')))
+    check(c,table+' duplicate key',f'SELECT {fields}, count(*) FROM {table} GROUP BY {fields} HAVING count(*)<>1', game_key=fields.split(',')[0] == 'gid')
+    check(c,table+' null key',f'SELECT {fields} FROM {table} WHERE '+ ' OR '.join(f'{n.strip()} IS NULL' for n in fields.split(',')), game_key=fields.split(',')[0] == 'gid')
 
 
 def label_periods(c: duckdb.DuckDBPyConnection) -> None:
@@ -103,13 +110,19 @@ def label_periods(c: duckdb.DuckDBPyConnection) -> None:
         WHERE s.status_type_completed AND s.game_date <= (SELECT cutoff FROM config)''').fetchall()
     cells = []
     for espn,gid,hid,aid,hs,aws,htext,atext,n in rows:
+        decision = 'missing_game_crosswalk' if gid is None else (
+            'missing_team_crosswalk' if hid is None or aid is None else 'invalid_period_count')
         try:
             if gid is None or hid is None or aid is None or n is None or int(n)!=n:
                 raise ValueError('No exact canonical fixture or period count')
+            decision = 'invalid_period_vector'
             h,a = parse_periods(htext,hs,int(n)),parse_periods(atext,aws,int(n))
             if any(sum(h[:i])!=sum(a[:i]) for i in range(4,len(h))):
+                decision = 'overtime_without_tied_score'
                 raise ValueError('Overtime started without a tie')
         except (TypeError,ValueError) as exc:
+            event('release_validation', 'held', check='canonical period fixture', source_id=str(espn), game_id=gid,
+                  decision=decision)
             raise ValueError(f'Fixture {espn}/{gid}: {exc}') from exc
         cells += [(gid,team,i,pts) for team,vector in ((hid,h),(aid,a)) for i,pts in enumerate(vector,1)]
     c.execute('CREATE TEMP TABLE period_cells(game_id VARCHAR,team_id BIGINT,period_number SMALLINT,points INT,PRIMARY KEY(game_id,team_id,period_number))')
@@ -155,18 +168,23 @@ def validate_stage(c: duckdb.DuckDBPyConnection) -> None:
           OR field_goals_made>field_goals_attempted OR three_point_field_goals_made>three_point_field_goals_attempted
           OR three_point_field_goals_made>field_goals_made OR three_point_field_goals_attempted>field_goals_attempted
           OR free_throws_made>free_throws_attempted OR least(field_goals_made,free_throws_made,three_point_field_goals_made,turnovers,team_turnovers)<0''',
-      'player side': '''SELECT gid,athlete_id FROM player_obs WHERE nba_team IS NULL OR did_not_play IS NULL OR
-          (game_date,season_type,home_away,team_score,opponent_team_score,team_winner)
-          IS DISTINCT FROM (canonical_date,canonical_phase,side,score,opponent_score,score>opponent_score)
-          OR (person IS NOT NULL AND athlete_display_name IS DISTINCT FROM espn_name)
-          OR (did_not_play AND (points IS NOT NULL OR minutes>0 OR reason IS NULL))
-          OR (NOT did_not_play AND (points IS NULL OR points IS DISTINCT FROM 2*field_goals_made+three_point_field_goals_made+free_throws_made
-              OR (minutes IS NULL AND (points<>0 OR starter IS NOT FALSE OR reason IS NULL
-                  OR field_goals_attempted<>0 OR free_throws_attempted<>0 OR rebounds<>0 OR assists<>0
-                  OR steals<>0 OR blocks<>0 OR turnovers<>0 OR fouls<>0))
-              OR (minutes IS NOT NULL AND (NOT isfinite(minutes) OR minutes<0 OR minutes<>trunc(minutes)))
-              OR field_goals_made>field_goals_attempted OR free_throws_made>free_throws_attempted
-              OR three_point_field_goals_made>three_point_field_goals_attempted))''',
+      'player side': '''SELECT gid,athlete_id, CASE
+          WHEN nba_team IS NULL OR did_not_play IS NULL THEN 'missing_team_or_participation'
+          WHEN (game_date,season_type,home_away,team_score,opponent_team_score,team_winner)
+               IS DISTINCT FROM (canonical_date,canonical_phase,side,score,opponent_score,score>opponent_score)
+               THEN 'fixture_side_disagreement'
+          WHEN person IS NOT NULL AND athlete_display_name IS DISTINCT FROM espn_name THEN 'crosswalk_name_disagreement'
+          WHEN did_not_play AND (points IS NOT NULL OR minutes>0 OR reason IS NULL) THEN 'invalid_dnp_row'
+          WHEN NOT did_not_play AND (points IS NULL OR points IS DISTINCT FROM 2*field_goals_made+three_point_field_goals_made+free_throws_made)
+               THEN 'player_points_disagreement'
+          WHEN NOT did_not_play AND minutes IS NULL AND (points<>0 OR starter IS NOT FALSE OR reason IS NULL
+               OR field_goals_attempted<>0 OR free_throws_attempted<>0 OR rebounds<>0 OR assists<>0
+               OR steals<>0 OR blocks<>0 OR turnovers<>0 OR fouls<>0) THEN 'missing_played_minutes'
+          WHEN NOT did_not_play AND minutes IS NOT NULL AND (NOT isfinite(minutes) OR minutes<0 OR minutes<>trunc(minutes))
+               THEN 'invalid_played_minutes'
+          WHEN NOT did_not_play AND (field_goals_made>field_goals_attempted OR free_throws_made>free_throws_attempted
+               OR three_point_field_goals_made>three_point_field_goals_attempted) THEN 'player_makes_exceed_attempts'
+          END AS diagnostic_code FROM player_obs WHERE diagnostic_code IS NOT NULL''',
       'played team totals': '''WITH totals AS (SELECT gid,nba_team,count(*) AS played,sum(points) AS pts,sum(minutes) AS mins,
            sum(field_goals_made) AS fgm,sum(three_point_field_goals_made) AS fg3m,sum(free_throws_made) AS ftm
            FROM player_obs WHERE NOT did_not_play GROUP BY 1,2)
@@ -191,7 +209,7 @@ def validate_stage(c: duckdb.DuckDBPyConnection) -> None:
           WHERE (v.home_points,v.away_points) IS DISTINCT FROM (h.points,a.points)''',
     }
     for name,sql in queries.items():
-        check(c,name,sql)
+        check(c,name,sql,game_key=name != 'scope')
     # Match every chart observation to the shooting stream without using row order or a lossy set.
     shot_fields = ('game_id,season,period_number,clock_display_value,team_id,athlete_id_1,athlete_id_2,'
                    'type_id,type_text,scoring_play,score_value,coordinate_x,coordinate_y,coordinate_x_raw,coordinate_y_raw,athlete_name_1,athlete_name_2')
@@ -292,6 +310,10 @@ def replay(c: duckdb.DuckDBPyConnection, output: Path) -> None:
     print(f'{len(names)} relations replayed exactly')
 
 
+class CutoffNotReady(ValueError):
+    pass
+
+
 def run(a: argparse.Namespace) -> None:
     output: Path = a.output.absolute()
     if a.action=='build' and (os.path.lexists(output) or os.path.lexists(f'{output}.wal')):
@@ -300,8 +322,16 @@ def run(a: argparse.Namespace) -> None:
         raise ValueError('Cutoff is out of season')
     assets = input_assets(a.assets,a.season_end)
     cutoff_closed = datetime.combine(a.cutoff+timedelta(days=1),time(),tzinfo=ET)
-    if cutoff_closed>datetime.now(timezone.utc) or any(datetime.fromisoformat(i.updated_at)<cutoff_closed for i in assets if i.role in {'schedule','team','player','play','shot'}):
-        raise ValueError('Cutoff is not closed in Eastern time or a dynamic asset predates the end of cutoff')
+    now = datetime.now(timezone.utc)
+    stale = [i for i in assets if i.role in {'schedule','team','player','play','shot'}
+             and datetime.fromisoformat(i.updated_at) < cutoff_closed]
+    if cutoff_closed > now or stale:
+        if cutoff_closed > now:
+            event('release_freshness', 'deferred', reason='cutoff_open')
+        for asset in stale:
+            event('release_freshness', 'deferred', reason='publisher_asset_stale', role=asset.role, sha256=asset.digest,
+                  asset_updated_at=datetime.fromisoformat(asset.updated_at).astimezone(timezone.utc).isoformat())
+        raise CutoffNotReady('Cutoff is not closed in Eastern time or a dynamic asset predates the end of cutoff')
     paths = (a.history,a.prior,*(p for i in assets for p in (i.path,i.path.with_suffix('.parquet.asset.json'))))
     if a.previous_release is not None:
         paths = (*paths,a.previous_release)
@@ -311,11 +341,11 @@ def run(a: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(dir=output.parent,prefix='.nba-current-') as work:
         target = Path(work)/'release.duckdb' if a.action=='build' else output
         if a.action=='build':
-            with duckdb.connect(str(target),config={'threads':2}) as c:
+            with stage('materialize'), duckdb.connect(str(target),config={'threads':2}) as c:
                 materialize(c,a,assets)
                 c.execute('CHECKPOINT')
         snapshot(target)
-        with duckdb.connect(config={'threads':2}) as c:
+        with stage('replay'), duckdb.connect(config={'threads':2}) as c:
             materialize(c,a,assets)
             replay(c,target)
             print(c.execute('''SELECT count(*) AS finals, sum(played_player_rows) AS player_rows,
@@ -329,7 +359,7 @@ def run(a: argparse.Namespace) -> None:
     print(output)
 
 
-def main() -> None:
+def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('action',choices=('build','verify-inputs'))
     p.add_argument('--cutoff',type=date.fromisoformat,required=True)
@@ -339,8 +369,19 @@ def main() -> None:
     p.add_argument('--prior',type=Path,default=ROOT/'data/nba-2026-27-box-check-2026-11-19.duckdb')
     p.add_argument('--previous-release',type=Path,help='Require exact preservation of this release’s prior final results')
     p.add_argument('--output',type=Path,required=True)
-    run(p.parse_args())
+    args = p.parse_args()
+    with operation('current_release', args.output, 'release_validation_run',
+                   cutoff=args.cutoff.isoformat(), asset_set=args.assets.name) as span:
+        try:
+            run(args)
+        except CutoffNotReady:
+            span.outcome = 'deferred'
+            span.result['reason'] = 'cutoff_not_ready'
+            if span.parent and span.trace.workflow == 'daily_refresh':
+                return 75
+            raise
+    return 0
 
 
 if __name__=='__main__':
-    main()
+    sys.exit(main())

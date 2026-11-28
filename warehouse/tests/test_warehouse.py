@@ -159,7 +159,6 @@ def test_same_day_refresh_retry_captures_new_publisher_assets(tmp_path, monkeypa
 def test_daily_pregame_capture_is_published_when_game_assets_are_late(warehouse, tmp_path, monkeypatch):
     monkeypatch.setattr(sys, 'argv', ['daily_refresh.py', '--warehouse', str(warehouse), '--cutoff', '2026-11-21'])
     monkeypatch.setattr(daily_refresh, 'ROOT', tmp_path)
-    monkeypatch.setattr(daily_refresh, 'REPORTS', tmp_path / 'data' / 'reports')
     monkeypatch.setattr(daily_refresh, 'warehouse_lock', nullcontext)
     monkeypatch.setattr(daily_refresh, 'capture_daily', lambda now: ({'report': object()}, []))
     monkeypatch.setattr(daily_refresh.pregame_sources, 'capture', lambda now: None)
@@ -182,7 +181,6 @@ def test_daily_pregame_capture_is_published_when_game_assets_are_late(warehouse,
 
 def test_daily_publishes_partial_injury_capture_and_surfaces_source_block(warehouse, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, 'argv', ['daily_refresh.py', '--warehouse', str(warehouse), '--cutoff', '2026-11-20'])
-    monkeypatch.setattr(daily_refresh, 'REPORTS', tmp_path)
     monkeypatch.setattr(daily_refresh, 'warehouse_lock', nullcontext)
     monkeypatch.setattr(daily_refresh, 'capture_daily', lambda now: ({'report': object()}, ['NBA source block']))
     monkeypatch.setattr(daily_refresh.pregame_sources, 'capture', lambda now: 'roster')
@@ -194,7 +192,7 @@ def test_daily_publishes_partial_injury_capture_and_surfaces_source_block(wareho
 
     monkeypatch.setattr(daily_refresh, 'publish_injury_reports', publish)
     assert daily_refresh.main() == 1
-    assert 'NBA source block' in capsys.readouterr().err
+    assert 'NBA injury report capture partial (1 errors)' in capsys.readouterr().err
     with duckdb.connect(str(warehouse), read_only=True) as c:
         assert c.execute('SELECT captured FROM raw.pregame_capture').fetchone() == (1,)
 
@@ -292,3 +290,71 @@ def test_coverage_requires_five_starters_for_each_team():
     c.execute(coverage.SQL.replace('{tracked}', tracked))
     assert c.execute("SELECT game_id,status FROM audit.game_coverage WHERE domain='starting_lineup' ORDER BY game_id").fetchall() == [
         ('bad', 'partial'), ('valid', 'present')]
+
+
+def test_refresh_publication_receipt_matches_installed_database(warehouse, tmp_path, monkeypatch):
+    import observability as obs
+
+    refresh_cutoff = dt.date(2026, 11, 21)
+    current = snapshot(tmp_path, HOME)
+
+    def fail_replace(*_):
+        raise PermissionError('permission to replace denied')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(daily_refresh.os, 'replace', fail_replace)
+        with pytest.raises(PermissionError), obs.operation('daily_refresh', warehouse,
+                                                           cutoff=refresh_cutoff.isoformat()):
+            daily_refresh.merge(warehouse, current, refresh_cutoff, dt.datetime.now(dt.timezone.utc), tmp_path)
+    with duckdb.connect(str(warehouse), read_only=True) as c:
+        assert c.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name='pipeline_publication'").fetchone() == (0,)
+
+    with obs.operation('daily_refresh', warehouse, cutoff=refresh_cutoff.isoformat()) as run:
+        daily_refresh.merge(warehouse, current, refresh_cutoff, dt.datetime.now(dt.timezone.utc), tmp_path)
+    with duckdb.connect(str(warehouse), read_only=True) as c:
+        assert c.execute("SELECT run_id, kind, cutoff FROM audit.pipeline_publication").fetchall() == [
+            (run.trace.run_id, 'completed_games', refresh_cutoff)]
+
+
+def test_chase_records_block_without_closing_gap_and_records_retry(warehouse, monkeypatch, tmp_path):
+    import sqlite3
+
+    import chase_gaps
+    import observability as obs
+
+    gid = '0022600001'
+    with duckdb.connect(str(warehouse)) as c:
+        c.execute("ALTER TABLE core.dim_game ADD COLUMN result_status VARCHAR DEFAULT 'final'")
+        c.execute("ALTER TABLE core.dim_game ADD COLUMN season_start INT DEFAULT 2026")
+        c.execute("ALTER TABLE core.dim_game ADD COLUMN home_team_id BIGINT DEFAULT " + str(HOME))
+        c.execute("ALTER TABLE core.dim_game ADD COLUMN away_team_id BIGINT DEFAULT " + str(AWAY))
+        c.execute("CREATE TABLE core.team_source_id(team_id BIGINT, league VARCHAR, season_end_year INT, source_key VARCHAR)")
+        c.execute("INSERT INTO core.team_source_id VALUES (?, 'NBA', 2027, 'BOS'), (?, 'NBA', 2027, 'NYK')", [HOME, AWAY])
+        c.execute("DELETE FROM core.fact_game_period_score")
+
+    def blocked(path):
+        raise chase_gaps.BlockedError('blocked message with source context', 429)
+
+    monkeypatch.setattr(chase_gaps, 'fetch', blocked)
+    monkeypatch.setattr(chase_gaps, 'warehouse_lock', nullcontext)
+    monkeypatch.setattr(chase_gaps, 'connect', lambda p: duckdb.connect(str(p)))
+    monkeypatch.setattr(sys, 'argv', ['chase_gaps.py', 'periods', '--warehouse', str(warehouse)])
+    with pytest.raises(SystemExit) as failure:
+        chase_gaps.main()
+    assert failure.value.code == 3
+    with duckdb.connect(str(warehouse), read_only=True) as c:
+        assert c.execute('SELECT count(*) FROM audit.gap_attempt').fetchone() == (0,)
+
+    day = dt.date(2026, 11, 20)
+    page = box_html('/boxscores/202611200BOS.html', day, ('BOS', [25, 25, 25, 26]), ('NYK', [25, 25, 25, 24]))
+    monkeypatch.setattr(chase_gaps, 'fetch', lambda path: page.decode())
+    chase_gaps.main()
+    with duckdb.connect(str(warehouse), read_only=True) as c:
+        assert c.execute("SELECT game_id, outcome FROM audit.gap_attempt").fetchall() == [(gid, 'admitted')]
+        assert c.execute("SELECT sha256 FROM audit.period_receipt_bref_chase").fetchone() == (hashlib.sha256(page).hexdigest(),)
+    with sqlite3.connect(obs.store_path(warehouse)) as c:
+        events = c.execute("SELECT run_id, outcome, details FROM events WHERE game_id=? AND phase='period_attempt' "
+                           "AND outcome<>'started' ORDER BY event_id", (gid,)).fetchall()
+    assert [row[1] for row in events] == ['blocked', 'admitted']
+    assert events[0][0] != events[1][0]
+    assert '"http_status": 429' in events[0][2]

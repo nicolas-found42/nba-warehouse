@@ -20,6 +20,8 @@ CACHE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evi
 ET = ZoneInfo('America/New_York')
 
 
+from observability import error_details, event, stage
+
 def fetch(url: str, dest: Path, signature: bytes) -> Path:
     if not dest.exists():
         with urlopen(Request(url, headers={'User-Agent': 'NBAWarehouse-Research/1.0'}), timeout=20) as response:
@@ -72,7 +74,10 @@ def roster_availability(started: dt.datetime, received: dt.datetime, modified: d
 def capture(now: dt.datetime, history: bool = False):
     season = now.year + (now.month >= 7)
     schedule_url = f'{SOURCE}stats/schedule/season={season}/data.parquet'
-    schedule = fetch(schedule_url, CACHE / f'{now:%Y-%m-%d_%H}-schedule.parquet', b'PAR1')
+    schedule_target = CACHE / f'{now:%Y-%m-%d_%H}-schedule.parquet'
+    with stage('pregame_schedule', cached=schedule_target.is_file()) as step:
+        schedule = fetch(schedule_url, schedule_target, b'PAR1')
+        step.result['schedules'] = 1
     if history:
         roster_index = fetch(f'{SOURCE}stats/rosters_daily/season={season}/data.parquet',
                              CACHE / f'{now:%Y-%m-%d_%H}-roster-index.parquet', b'PAR1')
@@ -87,8 +92,10 @@ def capture(now: dt.datetime, history: bool = False):
             raw, received, modified = roster_bytes(url, CACHE / f'{date}-roster.json.gz')
         except HTTPError as e:
             if e.code in (403, 404) and date == now.date():
+                event('pregame_roster', 'deferred', availability_date=date.isoformat(), **error_details(e))
                 continue  # the publisher may not have captured today's rosters yet
             raise
+        event('pregame_roster', 'received', availability_date=date.isoformat(), sha256=hashlib.sha256(raw).hexdigest())
         envelope = json.loads(gzip.decompress(raw))
         captured_at = dt.datetime.fromisoformat(envelope['fetched'])
         if captured_at.tzinfo is None or captured_at.astimezone(ET).date() != date or captured_at > now:

@@ -22,7 +22,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from build_warehouse import DEFAULT_OUT, connect, warehouse_lock
+from build_warehouse import DEFAULT_OUT, connect, record_publication, warehouse_lock
+from observability import error_details, event, operation, stage
 from fetch_wayback_nba import cache_bytes
 import pregame_sources
 
@@ -69,6 +70,9 @@ class OfficialPdfSource:
                 try:
                     download(NBA + path.name, path, recent=recent)
                 except InjurySourceBlocked as error:
+                    cause = error.__cause__
+                    event('injury_source', 'blocked', reason='publisher_denied_access',
+                          http_status=cause.code if isinstance(cause, HTTPError) else None)
                     self.blocked = str(error)
 
 
@@ -202,7 +206,8 @@ def fetch_body(url: str) -> bytes:
                 return response.read(12_000_000)
         except HTTPError:
             raise
-        except (ConnectionError, TimeoutError, URLError):
+        except (ConnectionError, TimeoutError, URLError) as error:
+            event('injury_transport', 'failed' if retry_delay is None else 'retrying', **error_details(error))
             if retry_delay is None:
                 raise
             time.sleep(retry_delay)
@@ -329,6 +334,7 @@ def publish(c, reports: dict, mirror: list[Path] | None = None, pregame=None) ->
                       [f'{MIRROR}season={season}/data.parquet', str(path), season])
         pregame_sources.publish(c, pregame)
         c.execute(Path(__file__).with_suffix('.sql').read_text())
+        record_publication(c, 'pregame')
         c.execute('COMMIT')
     except BaseException:
         c.execute('ROLLBACK')
@@ -344,6 +350,7 @@ def capture_daily(now: dt.datetime) -> tuple[dict, list[str]]:
         try:
             reports[path] = read_pdf(path)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
+            event('injury_pdf_parse', 'held', **error_details(error))
             errors.append(f'Held injury report {retrieval_url(path)}: {error}')
     return reports, errors
 
@@ -517,6 +524,11 @@ def main() -> None:
     parser.add_argument('--cached-only', action='store_true', help='indexed-pdfs: import downloaded files without fetching')
     parser.add_argument('--index', type=Path, help='archive-pdfs and audit-archive: local official and Wayback PDF URL index')
     args = parser.parse_args()
+    with operation('injury_reports', args.warehouse, args.mode):
+        run_command(parser, args)
+
+
+def run_command(parser, args) -> None:
     now = dt.datetime.now(ET)
     mirrors = []
     pregame = None
@@ -547,8 +559,8 @@ def main() -> None:
     elif args.mode in ('archive-pdfs', 'audit-archive'):
         if args.index is None:
             parser.error(f'{args.mode} requires --index')
-        operation = archive_pdfs if args.mode == 'archive-pdfs' else audit_archive
-        raise SystemExit(0 if operation(args.warehouse, args.index, args.from_date, args.through or now.date()) else 1)
+        action = archive_pdfs if args.mode == 'archive-pdfs' else audit_archive
+        raise SystemExit(0 if action(args.warehouse, args.index, args.from_date, args.through or now.date()) else 1)
     elif args.mode == 'backfill':
         with connect(args.warehouse, read_only=True) as c:
             dates = c.execute('''SELECT DISTINCT game_date FROM core.dim_game WHERE season_type IN ('Preseason','Regular','Playoffs','PlayIn','Cup')
@@ -574,7 +586,7 @@ def main() -> None:
                 break
         print(f'Published {total} NBA injury reports in the requested range. {held} require another check.', flush=True)
         raise SystemExit(int(bool(held or source.blocked)))
-    with warehouse_lock(), connect(args.warehouse) as c:
+    with stage('pregame_publish', reports=len(reports)), warehouse_lock(), connect(args.warehouse) as c:
         publish(c, reports, mirrors, pregame)
     print(f'Published source data from {len(reports)} NBA PDFs and {len(mirrors)} season files', flush=True)
     if capture_errors:

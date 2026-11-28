@@ -11,8 +11,18 @@ base="$HOME/Library/Application Support/NBA Warehouse"
 app="$base/app"
 dest="$HOME/Library/LaunchAgents/com.nba-warehouse.daily-refresh.plist"
 mkdir -p "$app/warehouse/launchd" "$base/data/refresh-reports"
+# Resolve the runtime locally before reloading any service. Scheduled jobs use the cached environment.
+if ! /opt/homebrew/bin/uv run --offline -q --no-project --with duckdb==2.0.0 python -c 'import duckdb'; then
+  /opt/homebrew/bin/uv run -q --no-project --with duckdb==2.0.0 python -c 'import duckdb'
+fi
 rsync -a --delete --exclude __pycache__ --include '*/' --include '*.py' --include '*.sql' --include '*.csv' --include '*.sh' \
   --exclude '*' "$repo/warehouse/" "$app/warehouse/"
+revision=$(git -C "$repo" rev-parse HEAD)
+dirty=clean
+if [[ -n $(git -C "$repo" status --porcelain --untracked-files=no) ]]; then dirty=dirty; fi
+stamp=$(mktemp "$app/.warehouse-revision.XXXXXX")
+printf '%s %s\n' "$revision" "$dirty" > "$stamp"
+mv -f "$stamp" "$app/.warehouse-revision"
 ln -sfn "$base/data" "$app/data"
 hours=($(python3 -c "
 from datetime import datetime; from zoneinfo import ZoneInfo

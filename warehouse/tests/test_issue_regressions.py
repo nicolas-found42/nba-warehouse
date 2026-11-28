@@ -186,8 +186,10 @@ def test_daily_capture_keeps_valid_pdfs_when_one_is_malformed(monkeypatch):
 def test_injury_archive_preserves_source_ordinal_and_tracks_original_coverage(monkeypatch, tmp_path):
     import hashlib
     import load_injury_report_archive
+    from observability import operation
 
-    c = duckdb.connect()
+    target = tmp_path / 'pregame.duckdb'
+    c = duckdb.connect(str(target))
     c.execute('''CREATE SCHEMA raw; CREATE SCHEMA core; CREATE SCHEMA audit;
         CREATE TABLE core.dim_team(team_id BIGINT, abbreviation VARCHAR, display_name VARCHAR);
         INSERT INTO core.dim_team VALUES (1,'DET','Detroit Pistons'), (2,'ORL','Orlando Magic');
@@ -200,8 +202,13 @@ def test_injury_archive_preserves_source_ordinal_and_tracks_original_coverage(mo
         CREATE TABLE core.fact_player_game_stats(game_id VARCHAR, team_id BIGINT, person_id BIGINT, participation_status VARCHAR);
         INSERT INTO core.fact_player_game_stats VALUES ('0022600001',1,3,'played');
         CREATE TABLE core.fact_inactive_player(game_id VARCHAR, team_id BIGINT, person_id BIGINT);''')
-    publish(c, {Path('fixture.pdf'): ('fixture', dt.datetime(2026, 7, 8, tzinfo=ET), [
-        ReportRow(dt.date(2026, 7, 9), 'DET@ORL', 'Detroit Pistons', 'One, Player', 'Questionable', '')])})
+    with operation('daily_refresh', target, cutoff='2026-07-09') as run:
+        publish(c, {Path('fixture.pdf'): ('fixture', dt.datetime(2026, 7, 8, tzinfo=ET), [
+            ReportRow(dt.date(2026, 7, 9), 'DET@ORL', 'Detroit Pistons', 'One, Player', 'Questionable', '')])})
+    with duckdb.connect(str(target)) as reopened:
+        assert reopened.execute('SELECT run_id, kind, cutoff FROM audit.pipeline_publication').fetchall() == [
+            (run.trace.run_id, 'pregame', dt.date(2026, 7, 9))]
+
     archive = tmp_path / 'release.parquet'
     c.execute('''COPY (SELECT * FROM (VALUES
         (TIMESTAMP '2026-07-08 00:00:00', 1, 'One, Player', 3, 'Questionable', NULL),

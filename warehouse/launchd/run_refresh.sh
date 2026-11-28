@@ -4,4 +4,4 @@
 set -u
 cd "${0:A:h}/../.."
 mkdir -p data/refresh-reports
-exec /opt/homebrew/bin/uv run -q --no-project --with duckdb==2.0.0 python warehouse/daily_refresh.py "$@"
+exec /opt/homebrew/bin/python3 warehouse/launch_job.py daily_refresh "$@"

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from build_warehouse import DEFAULT_OUT, connect, q
+from observability import operation
 
 
 # One referee per normalized name (lowercase letters only, so "Sha'Rae" = "ShaRae"). Several names carry more than one
@@ -493,30 +494,31 @@ def main() -> None:
     ap.add_argument('--output', type=Path, default=DEFAULT_OUT)
     ap.add_argument('--only', nargs='*')
     a = ap.parse_args()
-    c = connect(a.output)
-    create_press_official_identities(c)
-    c.execute('''CREATE TABLE IF NOT EXISTS raw.captured_club_starter (
-        game_id VARCHAR, team_id BIGINT, person_id BIGINT, source VARCHAR, source_url VARCHAR,
-        PRIMARY KEY (game_id, team_id, person_id, source))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS raw.press_game_official (
-        game_id VARCHAR, official_id BIGINT, official_name VARCHAR, official_order INTEGER, source_url VARCHAR, sha256 VARCHAR,
-        PRIMARY KEY (game_id, official_id, sha256))''')
-    from load_usatoday_preseason import create_tables as create_usatoday_tables
-    create_usatoday_tables(c)
-    from load_nba_scorer_crews import create_table as create_scorer_crew_table
-    create_scorer_crew_table(c)
-    c.execute('''CREATE TABLE IF NOT EXISTS audit.domain_disposition (domain VARCHAR PRIMARY KEY, source VARCHAR,
-        source_rows BIGINT, published BIGINT, duplicate BIGINT, held BIGINT)''')
-    c.execute('CREATE TABLE IF NOT EXISTS audit.domain_held (domain VARCHAR, source_row BIGINT, reason VARCHAR, row_json JSON)')
-    if not a.only:
-        person_dimension(c)
-    for d in DOMAINS:
-        if a.only and d.name not in a.only:
-            continue
-        c.execute('DELETE FROM audit.domain_disposition WHERE domain = ?', [d.name])
-        c.execute('DELETE FROM audit.domain_held WHERE domain = ?', [d.name])
-        print(d.name, *promote(c, d), sep='\t', flush=True)
-    c.execute('CHECKPOINT')
+    with operation('promote_domains', a.output):
+        c = connect(a.output)
+        create_press_official_identities(c)
+        c.execute('''CREATE TABLE IF NOT EXISTS raw.captured_club_starter (
+            game_id VARCHAR, team_id BIGINT, person_id BIGINT, source VARCHAR, source_url VARCHAR,
+            PRIMARY KEY (game_id, team_id, person_id, source))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS raw.press_game_official (
+            game_id VARCHAR, official_id BIGINT, official_name VARCHAR, official_order INTEGER, source_url VARCHAR, sha256 VARCHAR,
+            PRIMARY KEY (game_id, official_id, sha256))''')
+        from load_usatoday_preseason import create_tables as create_usatoday_tables
+        create_usatoday_tables(c)
+        from load_nba_scorer_crews import create_table as create_scorer_crew_table
+        create_scorer_crew_table(c)
+        c.execute('''CREATE TABLE IF NOT EXISTS audit.domain_disposition (domain VARCHAR PRIMARY KEY, source VARCHAR,
+            source_rows BIGINT, published BIGINT, duplicate BIGINT, held BIGINT)''')
+        c.execute('CREATE TABLE IF NOT EXISTS audit.domain_held (domain VARCHAR, source_row BIGINT, reason VARCHAR, row_json JSON)')
+        if not a.only:
+            person_dimension(c)
+        for d in DOMAINS:
+            if a.only and d.name not in a.only:
+                continue
+            c.execute('DELETE FROM audit.domain_disposition WHERE domain = ?', [d.name])
+            c.execute('DELETE FROM audit.domain_held WHERE domain = ?', [d.name])
+            print(d.name, *promote(c, d), sep='\t', flush=True)
+        c.execute('CHECKPOINT')
 
 
 if __name__ == '__main__':

@@ -22,6 +22,7 @@ from pathlib import Path
 import duckdb
 
 from build_warehouse import DEFAULT_OUT, ROOT, connect, lit, q
+from observability import operation
 
 KAGGLE = ROOT / 'data' / 'kaggle'
 EXCLUDE = re.compile(r'top-?shot', re.I)  # NFT trading data, not basketball
@@ -129,30 +130,31 @@ def main() -> None:
     ap.add_argument('--output', type=Path, default=DEFAULT_OUT)
     ap.add_argument('--only', nargs='*')
     a = ap.parse_args()
-    catalog = {r['ref']: r for r in csv.DictReader((ROOT / 'warehouse' / 'kaggle_catalog.csv').open())}
-    c = connect(a.output)
-    for ext in ('sqlite', 'excel'):
-        c.execute(f'INSTALL {ext}; LOAD {ext}')
-    c.execute('CREATE SCHEMA IF NOT EXISTS raw_kaggle')
-    c.execute('''CREATE TABLE IF NOT EXISTS raw_kaggle._dataset (dataset_ref VARCHAR PRIMARY KEY, title VARCHAR,
-        kaggle_last_updated VARCHAR, votes INTEGER, downloaded_at VARCHAR, local_dir VARCHAR)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS raw_kaggle._file (dataset_ref VARCHAR, file_path VARCHAR, bytes BIGINT,
-        sha256 VARCHAR, status VARCHAR, note VARCHAR, tables VARCHAR[], row_count BIGINT, kaggle_last_updated VARCHAR)''')
-    for d in sorted(KAGGLE.iterdir()):
-        if not d.is_dir() or not (d / '.done').exists():
-            continue
-        ref = d.name.replace('__', '/', 1)
-        if a.only and ref not in a.only:
-            continue
-        if EXCLUDE.search(ref):
-            continue
-        meta = catalog.get(ref, {})
-        c.execute('INSERT OR REPLACE INTO raw_kaggle._dataset VALUES (?,?,?,?,?,?)',
-                  [ref, meta.get('title'), meta.get('lastUpdated'), int(meta.get('votes') or 0),
-                   (d / '.done').read_text().strip(), str(d.relative_to(ROOT))])
-        load_dataset(c, ref, d, meta)
-    c.execute('CHECKPOINT')
-    print(c.execute("SELECT status, count(*), sum(row_count) FROM raw_kaggle._file GROUP BY 1").fetchall())
+    with operation('load_kaggle', a.output):
+        catalog = {r['ref']: r for r in csv.DictReader((ROOT / 'warehouse' / 'kaggle_catalog.csv').open())}
+        c = connect(a.output)
+        for ext in ('sqlite', 'excel'):
+            c.execute(f'INSTALL {ext}; LOAD {ext}')
+        c.execute('CREATE SCHEMA IF NOT EXISTS raw_kaggle')
+        c.execute('''CREATE TABLE IF NOT EXISTS raw_kaggle._dataset (dataset_ref VARCHAR PRIMARY KEY, title VARCHAR,
+            kaggle_last_updated VARCHAR, votes INTEGER, downloaded_at VARCHAR, local_dir VARCHAR)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS raw_kaggle._file (dataset_ref VARCHAR, file_path VARCHAR, bytes BIGINT,
+            sha256 VARCHAR, status VARCHAR, note VARCHAR, tables VARCHAR[], row_count BIGINT, kaggle_last_updated VARCHAR)''')
+        for d in sorted(KAGGLE.iterdir()):
+            if not d.is_dir() or not (d / '.done').exists():
+                continue
+            ref = d.name.replace('__', '/', 1)
+            if a.only and ref not in a.only:
+                continue
+            if EXCLUDE.search(ref):
+                continue
+            meta = catalog.get(ref, {})
+            c.execute('INSERT OR REPLACE INTO raw_kaggle._dataset VALUES (?,?,?,?,?,?)',
+                      [ref, meta.get('title'), meta.get('lastUpdated'), int(meta.get('votes') or 0),
+                       (d / '.done').read_text().strip(), str(d.relative_to(ROOT))])
+            load_dataset(c, ref, d, meta)
+        c.execute('CHECKPOINT')
+        print(c.execute("SELECT status, count(*), sum(row_count) FROM raw_kaggle._file GROUP BY 1").fetchall())
 
 
 if __name__ == '__main__':

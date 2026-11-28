@@ -20,6 +20,7 @@ import argparse
 from pathlib import Path
 
 from build_warehouse import DEFAULT_OUT, connect, warehouse_lock
+from observability import operation
 from betting_kaggle import build_kaggle
 from pregame_sources import publish as publish_pregame
 
@@ -259,11 +260,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--output', type=Path, default=DEFAULT_OUT)
     a = ap.parse_args()
-    with warehouse_lock(), connect(a.output) as c:
-        build(c)
-        c.execute('CHECKPOINT')
-        for row in c.execute('SELECT * FROM betting.match_summary ORDER BY 1, 2').fetchall():
-            print(*row, sep='\t')
+    with operation('betting', a.output):
+        with warehouse_lock(), connect(a.output) as c:
+            build(c)
+            c.execute('CHECKPOINT')
+            for row in c.execute('SELECT * FROM betting.match_summary ORDER BY 1, 2').fetchall():
+                print(*row, sep='\t')
 
 
 if __name__ == '__main__':

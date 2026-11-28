@@ -106,6 +106,11 @@ Independently published shot and event rows are carried through the game refresh
 The job also snapshots the day's referee assignments. It publishes NBA injury reports, upcoming fixtures and
 captured rosters even when the completed-game release is delayed.
 
+### Operation history
+
+Use the [investigation runbook](docs/observability.md) to retrieve a scheduled or manual run,
+match it to a publication receipt, or replay a validation failure against pinned inputs.
+
 ### Pregame queries
 
 Use a timezone-bearing cutoff, such as `2026-11-25T16:00:00-05:00`, with `betting.odds_at(game_id, cutoff)`,

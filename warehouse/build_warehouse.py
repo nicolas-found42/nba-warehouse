@@ -18,9 +18,13 @@ import json
 import os
 import re
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
+
+from observability import CURRENT, event, operation, stage
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'data'
@@ -50,22 +54,31 @@ def lit(s: str) -> str:
 
 def connect(path: Path, read_only: bool = False, wait_seconds: int = 600) -> duckdb.DuckDBPyConnection:
     """Open the warehouse; if another process holds DuckDB's file lock (one writer at a time), wait and retry."""
-    import time
     tmp = DATA / '.duckdb_tmp'
     tmp.mkdir(exist_ok=True)
-    deadline = time.time() + wait_seconds
+    start = time.monotonic()
+    deadline = start + wait_seconds
+    retries = 0
     while True:
         try:
-            return duckdb.connect(str(path), read_only=read_only, config={
+            connection = duckdb.connect(str(path), read_only=read_only, config={
                 'threads': max(2, (os.cpu_count() or 4) - 4), 'memory_limit': '24GB',
                 'temp_directory': str(tmp), 'preserve_insertion_order': True})
-        except duckdb.IOException as e:
-            if 'lock' not in str(e).lower() or time.time() > deadline:
+        except duckdb.IOException as error:
+            if 'lock' not in str(error).lower() or time.monotonic() >= deadline:
+                event('duckdb_connect', 'failed', retries=retries, read_only=read_only,
+                      wait_ms=int((time.monotonic() - start) * 1000),
+                      reason='lock_timeout' if 'lock' in str(error).lower() else 'duckdb_io')
                 raise
-            time.sleep(5)
-
-
-from contextlib import contextmanager
+            if not retries:
+                event('duckdb_connect', 'waiting', reason='file_lock', read_only=read_only)
+            retries += 1
+            time.sleep(min(5, max(0, deadline - time.monotonic())))
+        else:
+            if retries:
+                event('duckdb_connect', 'succeeded', retries=retries, read_only=read_only,
+                      wait_ms=int((time.monotonic() - start) * 1000))
+            return connection
 
 
 @contextmanager
@@ -73,11 +86,25 @@ def warehouse_lock():
     """Exclusive lock for writers of the live warehouse (daily refresh swaps the file; gap chasing appends)."""
     import fcntl
     with (DATA / '.warehouse.lock').open('a') as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        with stage('writer_lock'):
+            fcntl.flock(f, fcntl.LOCK_EX)
         try:
             yield
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def record_publication(c, kind: str) -> None:
+    """Write a correlation receipt in the same publication boundary as the data."""
+    active = CURRENT.get()
+    if active is None or active.trace.workflow != 'daily_refresh':
+        return
+    c.execute("""CREATE TABLE IF NOT EXISTS audit.pipeline_publication (
+        run_id VARCHAR, kind VARCHAR, cutoff DATE, recorded_at TIMESTAMPTZ, revision VARCHAR,
+        PRIMARY KEY (run_id, kind))""")
+    c.execute('INSERT INTO audit.pipeline_publication VALUES (?, ?, ?, now(), ?)',
+              [active.trace.run_id, kind, active.trace.context['cutoff'], active.trace.context.get('revision')])
+    c.execute("DELETE FROM audit.pipeline_publication WHERE recorded_at < now() - INTERVAL 120 DAY")
 
 
 @contextmanager
@@ -348,6 +375,7 @@ def verify(out: Path) -> bool:
         if n:
             fails.append(f'core.{t}: {n} duplicate {key}')
 
+    event('warehouse_verification', 'failed' if fails else 'succeeded', count=checks, errors=len(fails))
     print(f'{checks} checks, {len(fails)} failures')
     for f in fails:
         print('FAIL', f)
@@ -360,12 +388,17 @@ def main() -> None:
     p.add_argument('command', choices=['build', 'verify'])
     p.add_argument('--output', type=Path, default=DEFAULT_OUT)
     a = p.parse_args()
-    if a.command == 'build':
-        if a.output.exists():
-            sys.exit(f'{a.output} exists; refusing to overwrite')
-        build(a.output)
-    else:
-        sys.exit(0 if verify(a.output) else 1)
+    with operation('warehouse_build', a.output, a.command) as span:
+        if a.command == 'build':
+            if a.output.exists():
+                span.result['reason'] = 'destination_exists'
+                sys.exit(f'{a.output} exists; refusing to overwrite')
+            build(a.output)
+        elif not verify(a.output):
+            span.outcome = 'failed'
+            span.result['reason'] = 'integrity_checks'
+    if span.outcome == 'failed':
+        sys.exit(1)
 
 
 if __name__ == '__main__':
