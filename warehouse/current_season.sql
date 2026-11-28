@@ -8,7 +8,7 @@ SELECT s.*,x.nba_game_id AS gid,h.nba_team_id::BIGINT AS hid,a.nba_team_id::BIGI
        cast(s.date AS TIMESTAMPTZ) AT TIME ZONE 'America/New_York' AS tip_et,
        CASE left(x.nba_game_id,3) WHEN '002' THEN 'Regular' WHEN '004' THEN 'Playoffs'
          WHEN '005' THEN 'PlayIn' WHEN '006' THEN 'Cup' END AS phase
-FROM source_schedule s LEFT JOIN source_game_map x ON s.id::VARCHAR=x.espn_game_id
+FROM source_schedule s LEFT JOIN game_crosswalk x ON s.id::VARCHAR=x.espn_game_id
 LEFT JOIN source_team_map h ON s.home_id=h.espn_team_id
 LEFT JOIN source_team_map a ON s.away_id=a.espn_team_id
 WHERE s.game_date <= (SELECT cutoff FROM config) AND s.status_type_completed;

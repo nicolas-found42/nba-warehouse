@@ -109,6 +109,21 @@ def test_refresh_commits_a_valid_snapshot(warehouse: Path, tmp_path: Path) -> No
     assert not (tmp_path / 'wh_refresh.duckdb').exists()
 
 
+def test_refresh_publishes_games_when_referee_source_is_unavailable(warehouse, tmp_path, monkeypatch):
+    from urllib.error import HTTPError
+
+    def blocked(*_):
+        raise HTTPError('https://official.nba.com/referee-assignments/', 403, 'Forbidden', {}, None)
+
+    monkeypatch.setattr(daily_refresh, 'referee_assignments', blocked)
+    result = daily_refresh.merge(warehouse, snapshot(tmp_path, HOME), dt.date(2026, 11, 21),
+                                 dt.datetime.now(dt.timezone.utc), tmp_path)
+    assert result['after']['fact_game_result'] == 2 and result['referee_rows'] is None
+    with duckdb.connect(str(warehouse), read_only=True) as c:
+        assert c.execute('SELECT outcome, referee_rows, note FROM audit.refresh_log').fetchall() == [
+            ('committed', None, 'referee_capture_unavailable')]
+
+
 def test_refresh_preserves_shot_references_when_player_stats_change(warehouse: Path, tmp_path: Path) -> None:
     with duckdb.connect(str(warehouse)) as c:
         c.execute("INSERT INTO core.fact_shot VALUES ('0022600001', 'shot1', 1)")

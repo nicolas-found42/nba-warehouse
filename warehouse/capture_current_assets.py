@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import re
-from observability import operation, stage
 import tempfile
 from urllib.request import Request, urlopen
 
-from refresh_current_season import ASSETS, DOWNLOAD, input_assets
+from observability import operation, stage
+from refresh_current_season import ASSETS, DOWNLOAD, FIXTURE_SCHEDULE, input_assets
 
 API = 'https://api.github.com/repos/sportsdataverse/sportsdataverse-data/releases/tags'
 LIMIT = 100_000_000
@@ -69,6 +70,25 @@ def capture(season_end: int, output: Path) -> None:
             output.rmdir()
             raise
     print(f'{len(ASSETS)} publisher-digest-matched assets: {output}')
+
+
+def append_fixture_schedule(bundle: Path, schedule: Path, url: str) -> None:
+    """Retain the exact NBA schedule mirror already read by the pregame job."""
+    target = bundle / FIXTURE_SCHEDULE
+    captured_at = datetime.fromtimestamp(schedule.stat().st_mtime, timezone.utc).isoformat()
+    raw = schedule.read_bytes()
+    receipt = dict(name=target.name, url=url, sha256=sha256(raw).hexdigest(), captured_at=captured_at)
+    metadata = target.with_suffix('.parquet.asset.json')
+    with tempfile.TemporaryDirectory(dir=bundle, prefix='.fixture-schedule-') as work:
+        source = Path(work) / target.name
+        source.write_bytes(raw)
+        source.with_suffix('.parquet.asset.json').write_text(json.dumps(receipt) + '\n')
+        os.link(source, target)
+        try:
+            os.link(source.with_suffix('.parquet.asset.json'), metadata)
+        except BaseException:
+            target.unlink()
+            raise
 
 
 def main() -> None:

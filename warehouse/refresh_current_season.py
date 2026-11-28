@@ -16,6 +16,7 @@ import duckdb
 
 from nba_warehouse import ROOT, WAREHOUSE, sql_string
 from observability import event, operation, stage
+from pregame_sources import SCHEDULE_URL
 from recover_archive_periods import sha256 as file_hash
 from recover_local_periods import difference, snapshot
 
@@ -29,6 +30,7 @@ ASSETS = {
     'play': ('espn_nba_pbp','play_by_play'),
     'shot': ('espn_nba_shots','shots'),
 }
+FIXTURE_SCHEDULE = 'nba_fixture_schedule.parquet'
 DOWNLOAD = 'https://github.com/sportsdataverse/sportsdataverse-data/releases/download'
 ET = ZoneInfo('America/New_York')
 CORE_BOX = {
@@ -59,7 +61,7 @@ class Input:
     path: Path
     url: str
     digest: str
-    asset_id: int
+    asset_id: int | None
     updated_at: str
 
 
@@ -73,6 +75,16 @@ def input_assets(root: Path, season_end: int) -> list[Input]:
         if (row['name'],row['url'],row['sha256']) != (path.name,url,digest) or type(row['asset_id']) is not int:
             raise ValueError(f'Source asset bytes or locator differ: {role}')
         items.append(Input(role,path,url,digest,row['asset_id'],row['published_asset_updated_at']))
+    fixture = root / FIXTURE_SCHEDULE
+    receipt = fixture.with_suffix('.parquet.asset.json')
+    if fixture.exists() or receipt.exists():
+        row = json.loads(receipt.read_text())
+        url = SCHEDULE_URL.format(season_end)
+        digest = file_hash(fixture)
+        captured = datetime.fromisoformat(row['captured_at'])
+        if (row['name'], row['url'], row['sha256']) != (fixture.name, url, digest) or captured.utcoffset() is None:
+            raise ValueError('Independent schedule receipt does not match its captured bytes')
+        items.append(Input('nba_fixture_schedule', fixture, url, digest, None, row['captured_at']))
     return items
 
 
@@ -103,17 +115,59 @@ def key(c: duckdb.DuckDBPyConnection, table: str, fields: str) -> None:
     check(c,table+' null key',f'SELECT {fields} FROM {table} WHERE '+ ' OR '.join(f'{n.strip()} IS NULL' for n in fields.split(',')), game_key=fields.split(',')[0] == 'gid')
 
 
+def stage_game_crosswalk(c: duckdb.DuckDBPyConnection, has_schedule: bool) -> None:
+    c.execute("""CREATE TEMP TABLE game_crosswalk AS
+        SELECT season, espn_game_id, nba_game_id, game_date, home_espn_team_id, away_espn_team_id,
+               nba_home_team_id, nba_away_team_id, match_method
+        FROM source_game_map WHERE nba_game_id IS NOT NULL""")
+    if not has_schedule:
+        return
+    c.execute("""CREATE TEMP TABLE official_fixtures AS
+        SELECT game_id, game_date, start_time, home_team_id, away_team_id, neutral_site, status
+        FROM source_nba_fixture_schedule WHERE season = (SELECT season_end FROM config)
+          AND left(game_id, 3) IN ('002','004','005','006') AND game_date <= (SELECT cutoff FROM config)""")
+    key(c, 'official_fixtures', 'game_id')
+    # Only a unique, already-final NBA fixture can resolve an absent publisher mapping.
+    # Keep an existing publisher ID even if it disagrees so validation can reject the conflict.
+    c.execute("""INSERT INTO game_crosswalk
+        SELECT s.season, s.id::VARCHAR, n.game_id, s.game_date, s.home_id, s.away_id,
+               n.home_team_id, n.away_team_id, 'nba_schedule_exact'
+        FROM source_schedule s
+        JOIN source_team_map h ON s.home_id=h.espn_team_id
+        JOIN source_team_map a ON s.away_id=a.espn_team_id
+        JOIN official_fixtures n ON n.game_date=s.game_date AND n.home_team_id=h.nba_team_id::VARCHAR
+             AND n.away_team_id=a.nba_team_id::VARCHAR AND n.start_time=cast(s.date AS TIMESTAMPTZ)
+             AND n.neutral_site=s.neutral_site AND n.status='final'
+        WHERE s.status_type_completed AND s.game_date <= (SELECT cutoff FROM config)
+          AND NOT EXISTS (SELECT 1 FROM game_crosswalk x WHERE x.espn_game_id=s.id::VARCHAR)
+        QUALIFY count(*) OVER (PARTITION BY s.id)=1""")
+    for (gid,) in c.execute("SELECT nba_game_id FROM game_crosswalk WHERE match_method='nba_schedule_exact'").fetchall():
+        event('release_validation', 'resolved', check='canonical fixture crosswalk', game_id=gid,
+              decision='nba_schedule_exact')
+
+
+def verify_fixture_schedule(c: duckdb.DuckDBPyConnection) -> None:
+    check(c, 'independent fixture inventory', """SELECT coalesce(g.gid,n.game_id)
+        FROM candidate g FULL JOIN official_fixtures n ON g.gid=n.game_id
+        WHERE (g.gid,g.game_date,g.hid,g.aid,'final') IS DISTINCT FROM
+          (n.game_id,n.game_date,try_cast(n.home_team_id AS BIGINT),try_cast(n.away_team_id AS BIGINT),n.status)""",
+          game_key=True)
+
+
 def label_periods(c: duckdb.DuckDBPyConnection) -> None:
     rows = c.execute('''SELECT s.id,x.nba_game_id,x.nba_home_team_id,x.nba_away_team_id,
         s.home_score,s.away_score,s.home_linescores,s.away_linescores,s.status_period
-        FROM source_schedule s LEFT JOIN source_game_map x ON s.id::VARCHAR=x.espn_game_id
+        FROM source_schedule s LEFT JOIN game_crosswalk x ON s.id::VARCHAR=x.espn_game_id
         WHERE s.status_type_completed AND s.game_date <= (SELECT cutoff FROM config)''').fetchall()
     cells = []
     for espn,gid,hid,aid,hs,aws,htext,atext,n in rows:
-        decision = 'missing_game_crosswalk' if gid is None else (
-            'missing_team_crosswalk' if hid is None or aid is None else 'invalid_period_count')
+        if gid is None:
+            event('release_validation', 'deferred', check='canonical period fixture', source_id=str(espn),
+                  decision='missing_game_crosswalk')
+            raise CutoffNotReady(f'Fixture {espn}: no unambiguous canonical game crosswalk')
+        decision = 'missing_team_crosswalk' if hid is None or aid is None else 'invalid_period_count'
         try:
-            if gid is None or hid is None or aid is None or n is None or int(n)!=n:
+            if hid is None or aid is None or n is None or int(n)!=n:
                 raise ValueError('No exact canonical fixture or period count')
             decision = 'invalid_period_vector'
             h,a = parse_periods(htext,hs,int(n)),parse_periods(atext,aws,int(n))
@@ -139,6 +193,31 @@ def project_box(c: duckdb.DuckDBPyConnection, table: str, mapping: dict[str,str]
     c.execute(f'CREATE TABLE nba.{table} AS SELECT {select} FROM {query}')
 
 
+PLAYER_SIDE_CHECK = '''SELECT gid,athlete_id, CASE
+          WHEN nba_team IS NULL OR did_not_play IS NULL THEN 'missing_team_or_participation'
+          WHEN (game_date,season_type,home_away,team_score,opponent_team_score,team_winner)
+               IS DISTINCT FROM (canonical_date,canonical_phase,side,score,opponent_score,score>opponent_score)
+               THEN 'fixture_side_disagreement'
+          WHEN person IS NOT NULL AND athlete_display_name IS DISTINCT FROM espn_name THEN 'crosswalk_name_disagreement'
+          WHEN did_not_play AND (points IS NOT NULL OR minutes>0 OR reason IS NULL) THEN 'invalid_dnp_row'
+          WHEN NOT did_not_play AND (points IS NULL OR points IS DISTINCT FROM 2*field_goals_made+three_point_field_goals_made+free_throws_made)
+               THEN 'player_points_disagreement'
+          WHEN NOT did_not_play AND minutes IS NULL AND (
+               starter IS DISTINCT FROM FALSE
+               OR (points,field_goals_made,field_goals_attempted,three_point_field_goals_made,three_point_field_goals_attempted,
+                   free_throws_made,free_throws_attempted,offensive_rebounds,defensive_rebounds,rebounds,
+                   assists,steals,blocks,turnovers,fouls) IS DISTINCT FROM (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
+               OR (plus_minus IS NOT NULL AND try_cast(plus_minus AS INT) IS DISTINCT FROM 0)
+               OR EXISTS (SELECT 1 FROM play_obs p WHERE p.game_id=b.game_id
+                   AND b.athlete_id IN (p.athlete_id_1,p.athlete_id_2,p.athlete_id_3)))
+               THEN 'missing_played_minutes'
+          WHEN NOT did_not_play AND minutes IS NOT NULL AND (NOT isfinite(minutes) OR minutes<0 OR minutes<>trunc(minutes))
+               THEN 'invalid_played_minutes'
+          WHEN NOT did_not_play AND (field_goals_made>field_goals_attempted OR free_throws_made>free_throws_attempted
+               OR three_point_field_goals_made>three_point_field_goals_attempted) THEN 'player_makes_exceed_attempts'
+          END AS diagnostic_code FROM player_obs b WHERE diagnostic_code IS NOT NULL'''
+
+
 def validate_stage(c: duckdb.DuckDBPyConnection) -> None:
     for table, fields in (
         ('candidate','gid'),('candidate','id'),('sides','gid,team_id'),('map_person','athlete'),('map_person','person'),
@@ -152,7 +231,7 @@ def validate_stage(c: duckdb.DuckDBPyConnection) -> None:
       'fixture': '''SELECT gid,id FROM candidate WHERE NOT regexp_full_match(gid,'[0-9]{10}') OR phase IS NULL
           OR substr(gid,4,2) IS DISTINCT FROM printf('%02d',(season-1)%100) OR xseason IS DISTINCT FROM season
           OR xdate IS DISTINCT FROM game_date OR (xhome,xaway,xhid,xaid) IS DISTINCT FROM (home_id,away_id,hid,aid)
-          OR game_match IS DISTINCT FROM 'both' OR neutral_site IS NULL OR cup_group IS NULL OR hid=aid
+          OR coalesce(game_match,'') NOT IN ('both','nba_schedule_exact') OR neutral_site IS NULL OR cup_group IS NULL OR hid=aid
           OR (phase='Regular' AND season_type IS DISTINCT FROM 2) OR (cup_group AND phase<>'Regular')
           OR (phase='Playoffs' AND season_type IS DISTINCT FROM 3) OR status_type_name IS DISTINCT FROM 'STATUS_FINAL'
           OR least(home_score,away_score)<=0 OR home_score=away_score OR home_score IS NULL OR away_score IS NULL
@@ -168,26 +247,10 @@ def validate_stage(c: duckdb.DuckDBPyConnection) -> None:
           OR field_goals_made>field_goals_attempted OR three_point_field_goals_made>three_point_field_goals_attempted
           OR three_point_field_goals_made>field_goals_made OR three_point_field_goals_attempted>field_goals_attempted
           OR free_throws_made>free_throws_attempted OR least(field_goals_made,free_throws_made,three_point_field_goals_made,turnovers,team_turnovers)<0''',
-      'player side': '''SELECT gid,athlete_id, CASE
-          WHEN nba_team IS NULL OR did_not_play IS NULL THEN 'missing_team_or_participation'
-          WHEN (game_date,season_type,home_away,team_score,opponent_team_score,team_winner)
-               IS DISTINCT FROM (canonical_date,canonical_phase,side,score,opponent_score,score>opponent_score)
-               THEN 'fixture_side_disagreement'
-          WHEN person IS NOT NULL AND athlete_display_name IS DISTINCT FROM espn_name THEN 'crosswalk_name_disagreement'
-          WHEN did_not_play AND (points IS NOT NULL OR minutes>0 OR reason IS NULL) THEN 'invalid_dnp_row'
-          WHEN NOT did_not_play AND (points IS NULL OR points IS DISTINCT FROM 2*field_goals_made+three_point_field_goals_made+free_throws_made)
-               THEN 'player_points_disagreement'
-          WHEN NOT did_not_play AND minutes IS NULL AND (points<>0 OR starter IS NOT FALSE OR reason IS NULL
-               OR field_goals_attempted<>0 OR free_throws_attempted<>0 OR rebounds<>0 OR assists<>0
-               OR steals<>0 OR blocks<>0 OR turnovers<>0 OR fouls<>0) THEN 'missing_played_minutes'
-          WHEN NOT did_not_play AND minutes IS NOT NULL AND (NOT isfinite(minutes) OR minutes<0 OR minutes<>trunc(minutes))
-               THEN 'invalid_played_minutes'
-          WHEN NOT did_not_play AND (field_goals_made>field_goals_attempted OR free_throws_made>free_throws_attempted
-               OR three_point_field_goals_made>three_point_field_goals_attempted) THEN 'player_makes_exceed_attempts'
-          END AS diagnostic_code FROM player_obs WHERE diagnostic_code IS NOT NULL''',
+      'player side': PLAYER_SIDE_CHECK,
       'played team totals': '''WITH totals AS (SELECT gid,nba_team,count(*) AS played,sum(points) AS pts,sum(minutes) AS mins,
            sum(field_goals_made) AS fgm,sum(three_point_field_goals_made) AS fg3m,sum(free_throws_made) AS ftm
-           FROM player_obs WHERE NOT did_not_play GROUP BY 1,2)
+           FROM player_obs WHERE NOT did_not_play AND minutes IS NOT NULL GROUP BY 1,2)
            SELECT t.gid,t.nba_team,played,mins FROM team_obs t LEFT JOIN totals p USING(gid,nba_team)
            WHERE (p.pts,p.fgm,p.fg3m,p.ftm) IS DISTINCT FROM (t.team_score,t.field_goals_made,t.three_point_field_goals_made,t.free_throws_made)
            OR abs(p.mins-5*(48+5*(t.periods-4)))>p.played*0.5+0.5''',
@@ -232,9 +295,17 @@ def materialize(c: duckdb.DuckDBPyConnection, a: argparse.Namespace, assets: lis
         WHERE espn_game_id IS NOT NULL GROUP BY 1 HAVING count(*)<>1''')
     key(c,'source_team_map','espn_team_id')
     key(c,'source_team_map','nba_team_id')
+    has_schedule = any(asset.role == 'nba_fixture_schedule' for asset in assets)
+    stage_game_crosswalk(c, has_schedule)
     label_periods(c)
     c.execute((WAREHOUSE/'current_season.sql').read_text())
     validate_stage(c)
+    if has_schedule:
+        verify_fixture_schedule(c)
+    for game_id, count in c.execute('''SELECT gid, count(*) FROM player_obs
+        WHERE NOT did_not_play AND minutes IS NULL AND reason IS NULL GROUP BY gid''').fetchall():
+        event('release_validation', 'held', check='unconfirmed player participation', game_id=game_id,
+              reason='blank_zero_stat_line', count=count)
     if a.previous_release is not None:
         c.execute(f'ATTACH {sql_string(str(a.previous_release))} AS previous (READ_ONLY)')
         previous_scope = c.execute('SELECT season_end,cutoff FROM previous.audit.scope').fetchall()
@@ -314,6 +385,25 @@ class CutoffNotReady(ValueError):
     pass
 
 
+def freshness_date(assets: list[Input], cutoff: date, season_end: int, now: datetime) -> date:
+    closed = datetime.combine(cutoff + timedelta(days=1), time(), tzinfo=ET)
+    if closed > now:
+        event('release_freshness', 'deferred', reason='cutoff_open')
+        raise CutoffNotReady('Cutoff is not closed in Eastern time')
+    schedule = next((item for item in assets if item.role == 'nba_fixture_schedule'), None)
+    if schedule is None or not closed <= datetime.fromisoformat(schedule.updated_at) <= now:
+        return cutoff
+    with duckdb.connect() as c:
+        last_game, end = c.execute("""SELECT max(game_date) FILTER (WHERE game_date <= ?), max(game_date)
+            FROM read_parquet(?) WHERE season = ? AND left(game_id, 3) IN ('002','004','005','006')""",
+            [cutoff, str(schedule.path), season_end]).fetchone()
+    if last_game is not None and end > cutoff and last_game < cutoff:
+        event('release_freshness', 'confirmed', decision='no_scheduled_games',
+              availability_date=last_game.isoformat(), sha256=schedule.digest)
+        return last_game
+    return cutoff
+
+
 def run(a: argparse.Namespace) -> None:
     output: Path = a.output.absolute()
     if a.action=='build' and (os.path.lexists(output) or os.path.lexists(f'{output}.wal')):
@@ -321,17 +411,16 @@ def run(a: argparse.Namespace) -> None:
     if a.cutoff.year not in (a.season_end-1,a.season_end):
         raise ValueError('Cutoff is out of season')
     assets = input_assets(a.assets,a.season_end)
-    cutoff_closed = datetime.combine(a.cutoff+timedelta(days=1),time(),tzinfo=ET)
     now = datetime.now(timezone.utc)
+    required_date = freshness_date(assets, a.cutoff, a.season_end, now)
+    required_at = datetime.combine(required_date + timedelta(days=1), time(), tzinfo=ET)
     stale = [i for i in assets if i.role in {'schedule','team','player','play','shot'}
-             and datetime.fromisoformat(i.updated_at) < cutoff_closed]
-    if cutoff_closed > now or stale:
-        if cutoff_closed > now:
-            event('release_freshness', 'deferred', reason='cutoff_open')
+             and datetime.fromisoformat(i.updated_at) < required_at]
+    if stale:
         for asset in stale:
             event('release_freshness', 'deferred', reason='publisher_asset_stale', role=asset.role, sha256=asset.digest,
                   asset_updated_at=datetime.fromisoformat(asset.updated_at).astimezone(timezone.utc).isoformat())
-        raise CutoffNotReady('Cutoff is not closed in Eastern time or a dynamic asset predates the end of cutoff')
+        raise CutoffNotReady('A dynamic asset predates the end of the last scheduled date in the cutoff')
     paths = (a.history,a.prior,*(p for i in assets for p in (i.path,i.path.with_suffix('.parquet.asset.json'))))
     if a.previous_release is not None:
         paths = (*paths,a.previous_release)

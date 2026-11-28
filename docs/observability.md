@@ -84,6 +84,14 @@ The review classified the 81 pre-existing tracked Python modules and 54 SQL file
 
 The historical local audit/cache files generally survive a process restart. Existing caches and plaintext logs are subject to the account's storage cleanup, with no SLA or verified automatic expiry. A BRef cached page or negative marker has fetch-time metadata where available, and Wayback capture time is distinct from local download time. Historical gap ledger timestamps record evaluation or publication time. Source rank and digest can support attribution without ordering independent loaders by timestamp. Adjudication source caveats and specific ingest incidents are documented in the source survey and issue handoff. [Source survey](research/gap-sources.md) · [Known loader incidents](https://github.com/nicolas-found42/nba-warehouse/issues/7) · [Operating handoff](https://github.com/nicolas-found42/nba-warehouse/issues/8)
 
+### Completed-game cutoff and fixture evidence
+
+The daily job retains the NBA fixture schedule mirror alongside the digest-verified SportsDataverse files when the mirror is available. The audit source row for `nba_fixture_schedule` carries the digest and local capture time. An exact, unique, final NBA fixture with the same Eastern date, tip time, home and away teams and neutral-site designation can supply a missing ESPN crosswalk. The release compares the full fixture inventory to the mirror when used. An unresolved crosswalk defers publication.
+
+On a date with no games, the requested Eastern day still has to be closed. A post-close NBA schedule capture spanning that date can establish the last scheduled date the dynamic feeds need to cover. Active game dates still require fresh files and complete final fixtures. The November 26 cutoff includes nine November 25 finals and no November 26 games. An all-zero player row with absent minutes and no starter flag or play attribution stays in `audit.player_source` and out of the player fact. A row with evidence of play still requires minutes.
+
+The candidate clone records `referee_capture_unavailable` in `audit.refresh_log.note` and a failed `referee_capture` span when that independent request fails. The audit row's `referee_rows` is null in that case. The verified game release can still commit.
+
 ## Signal contract, retention and cost
 
 - One SQLite sidecar per canonical warehouse path under the target file's parent `observability/`, with owner-only modes for newly created files. The launcher and child resolve the same key even when started through the checkout's data symlink. Database replacement at the same path preserves the history.

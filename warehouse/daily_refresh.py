@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import html
+from http.client import HTTPException
 import json
 import os
 import re
@@ -33,6 +34,7 @@ import duckdb
 import pregame_sources
 
 from build_warehouse import DEFAULT_OUT, ROOT, connect, lit, q, record_publication, warehouse_lock
+from capture_current_assets import append_fixture_schedule
 from injury_reports import capture_daily, publish as publish_injury_reports
 from observability import CURRENT, error_details, event, operation, stage
 
@@ -197,9 +199,14 @@ def merge(wh: Path, snap: Path, cutoff: dt.date, refs_captured: dt.datetime, wor
         c.execute(f"INSERT INTO core.fact_regular_standings SELECT *, 'as_of', DATE {lit(cutoff.isoformat())} FROM snap.nba.fact_regular_standings")
         for (t,) in c.execute("SELECT table_name FROM duckdb_tables() WHERE database_name='snap' AND schema_name='audit'").fetchall():
             c.execute(f'CREATE OR REPLACE TABLE audit.{q(PREFIX + t)} AS SELECT * FROM snap.audit.{q(t)}')
-        with stage('referee_capture', dependency='nba_official') as step:
-            refs = referee_assignments(c, refs_captured)
-            step.result['refs'] = refs
+        try:
+            with stage('referee_capture', dependency='nba_official') as step:
+                refs = referee_assignments(c, refs_captured)
+                step.result['refs'] = refs
+        except (OSError, HTTPException):
+            # A failed request or capture file cannot invalidate otherwise verified games.
+            # DuckDB errors still fail the publication.
+            refs = None
         with stage('warehouse_integrity') as step:
             fails = integrity(c)
             step.result['errors'] = len(fails)
@@ -220,8 +227,9 @@ def merge(wh: Path, snap: Path, cutoff: dt.date, refs_captured: dt.datetime, wor
             raise RuntimeError('integrity checks failed: ' + '; '.join(fails))
         c.execute('''CREATE TABLE IF NOT EXISTS audit.refresh_log (ran_at TIMESTAMPTZ, cutoff DATE, outcome VARCHAR,
             rows_before JSON, rows_after JSON, referee_rows INTEGER, note VARCHAR)''')
-        c.execute("INSERT INTO audit.refresh_log VALUES (now(), ?, 'committed', ?, ?, ?, NULL)",
-                  [cutoff, json.dumps(before), json.dumps(after), refs])
+        c.execute("INSERT INTO audit.refresh_log VALUES (now(), ?, 'committed', ?, ?, ?, ?)",
+                  [cutoff, json.dumps(before), json.dumps(after), refs,
+                   'referee_capture_unavailable' if refs is None else None])
         record_publication(c, 'completed_games')
         with stage('checkpoint'):
             c.execute('DETACH snap')
@@ -306,6 +314,14 @@ def refresh(a, now: dt.datetime, cutoff: dt.date, run_span) -> int:
             with stage('release_capture', dependency='sportsdataverse') as step:
                 assets = capture(cutoff, now)
                 step.result['asset_set'] = assets.name
+            try:
+                with stage('release_fixture_schedule', dependency='nba_schedule_mirror'):
+                    schedule = pregame[:2] if pregame else pregame_sources.capture_schedule(now)
+                    if schedule[0] is not None:
+                        append_fixture_schedule(assets, *schedule)
+            except OSError:
+                # A normal game-date build can still use the publisher's full, fresh inputs.
+                pass
             with stage('export_inputs'):
                 hist, prior, prev = export_inputs(a.warehouse, work)
             snap = work / 'snapshot.duckdb'

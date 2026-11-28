@@ -16,6 +16,7 @@ import duckdb
 from fetch_wayback_nba import cache_bytes
 
 SOURCE = 'https://basketball-data.billmill.org/nba/'
+SCHEDULE_URL = SOURCE + 'stats/schedule/season={}/data.parquet'
 CACHE = Path.home() / 'Library' / 'Application Support' / 'NBA Warehouse' / 'evidence' / 'pregame'
 ET = ZoneInfo('America/New_York')
 
@@ -71,13 +72,19 @@ def roster_availability(started: dt.datetime, received: dt.datetime, modified: d
     return received, 'local_retrieval'
 
 
+def capture_schedule(now: dt.datetime) -> tuple[Path, str]:
+    season = now.year + (now.month >= 7)
+    url = SCHEDULE_URL.format(season)
+    target = CACHE / f'{now:%Y-%m-%d_%H}-schedule.parquet'
+    with stage('pregame_schedule', cached=target.is_file()) as step:
+        schedule = fetch(url, target, b'PAR1')
+        step.result['schedules'] = 1
+    return schedule, url
+
+
 def capture(now: dt.datetime, history: bool = False):
     season = now.year + (now.month >= 7)
-    schedule_url = f'{SOURCE}stats/schedule/season={season}/data.parquet'
-    schedule_target = CACHE / f'{now:%Y-%m-%d_%H}-schedule.parquet'
-    with stage('pregame_schedule', cached=schedule_target.is_file()) as step:
-        schedule = fetch(schedule_url, schedule_target, b'PAR1')
-        step.result['schedules'] = 1
+    schedule, schedule_url = capture_schedule(now)
     if history:
         roster_index = fetch(f'{SOURCE}stats/rosters_daily/season={season}/data.parquet',
                              CACHE / f'{now:%Y-%m-%d_%H}-roster-index.parquet', b'PAR1')
