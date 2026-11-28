@@ -24,7 +24,7 @@ from pathlib import Path
 
 import duckdb
 
-from observability import CURRENT, event, operation, stage
+from observability import CURRENT, error_details, event, operation, stage
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'data'
@@ -65,10 +65,11 @@ def connect(path: Path, read_only: bool = False, wait_seconds: int = 600) -> duc
                 'threads': max(2, (os.cpu_count() or 4) - 4), 'memory_limit': '24GB',
                 'temp_directory': str(tmp), 'preserve_insertion_order': True})
         except duckdb.IOException as error:
-            if 'lock' not in str(error).lower() or time.monotonic() >= deadline:
+            reason = error_details(error)['reason']
+            if reason != 'file_lock' or time.monotonic() >= deadline:
                 event('duckdb_connect', 'failed', retries=retries, read_only=read_only,
                       wait_ms=int((time.monotonic() - start) * 1000),
-                      reason='lock_timeout' if 'lock' in str(error).lower() else 'duckdb_io')
+                      reason='lock_timeout' if reason == 'file_lock' else reason)
                 raise
             if not retries:
                 event('duckdb_connect', 'waiting', reason='file_lock', read_only=read_only)

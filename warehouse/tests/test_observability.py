@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import duckdb
 import pytest
 
 import diagnostics
@@ -55,6 +56,7 @@ with operation('fake_child', Path('/unused')) as run:
     assert events[2]['parent_span_id'] == events[1]['span_id']
     assert events[2]['span_id'] == events[3]['span_id']
     assert events[3]['details']['http_status'] == 429
+    assert events[0]['details']['trigger'] == 'manual'
     assert events[5]['details']['exit_code'] == 9
     assert events[5]['duration_ms'] >= 0
     assert 'private-' not in json.dumps(data)
@@ -64,9 +66,10 @@ with operation('fake_child', Path('/unused')) as run:
 def test_exit_before_child_entry_is_distinguishable(tmp_path):
     target = tmp_path / 'warehouse.duckdb'
     assert launch_job.launch('daily_refresh', [sys.executable, '-c', 'raise SystemExit(11)'], target,
-                             cutoff='2026-11-25') == 11
+                             cutoff='2026-11-25', trigger='launchd') == 11
     events = retrieve(target, '--cutoff', '2026-11-25')['events']
     assert [(r['phase'], r['outcome']) for r in events] == [('launch', 'started'), ('launch', 'failed')]
+    assert events[-1]['details']['trigger'] == 'launchd'
 
 
 def test_killed_process_leaves_started_span_and_next_run_survives(tmp_path, monkeypatch):
@@ -216,3 +219,34 @@ def test_status_recovers_corrupt_history_and_records_stale_view(tmp_path, monkey
     assert any(e['phase'] == 'status_page_write' and e['outcome'] == 'succeeded' for e in events)
     assert 'samples' in json.loads((out / 'history.json').read_text())
     assert (out / 'index.html').read_text().startswith('<!doctype html>')
+
+
+def test_duckdb_writer_lock_is_distinct_from_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setenv('PYTHONPATH', str(SCRIPTS))
+    target = tmp_path / 'lock' / 'warehouse.duckdb'
+    target.parent.mkdir()
+    missing = target.with_name('missing.duckdb')
+    script = """
+import sys
+from pathlib import Path
+
+import build_warehouse
+from observability import operation
+
+target = Path(sys.argv[1])
+build_warehouse.DATA = target.parent
+with operation('read_case', target):
+    build_warehouse.connect(target, read_only=True, wait_seconds=0.1)
+"""
+    command = [sys.executable, '-c', script]
+    with duckdb.connect(str(target)) as writer:
+        writer.execute('CREATE TABLE fixture AS SELECT 1 AS sample')
+        assert subprocess.run([*command, str(target)], capture_output=True, timeout=5).returncode == 1
+    assert subprocess.run([*command, str(missing)], capture_output=True, timeout=5).returncode == 1
+    attempts = [r for r in retrieve(target)['events'] if r['phase'] == 'duckdb_connect']
+    assert [(r['outcome'], r['details']['reason']) for r in attempts] == [
+        ('waiting', 'file_lock'), ('failed', 'lock_timeout')]
+    assert attempts[-1]['details']['retries'] == 1
+    missing_attempt = next(r for r in retrieve(missing)['events'] if r['phase'] == 'duckdb_connect')
+    assert missing_attempt['details']['reason'] == 'warehouse_file_missing'
+    assert missing_attempt['details']['retries'] == 0

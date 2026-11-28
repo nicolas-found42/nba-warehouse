@@ -19,6 +19,8 @@ import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import duckdb
+
 from observability import error_details, event, operation, stage
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,7 +66,6 @@ def launchd(label: str) -> dict:
 def db_numbers(state: dict) -> dict:
     """Small read-only queries; if a job holds the database, reuse the last numbers."""
     import time
-    import duckdb
     c = None
     for attempt in range(6):  # a job may hold the file for a moment; try for ~30 s
         try:

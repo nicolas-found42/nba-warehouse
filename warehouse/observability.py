@@ -39,7 +39,7 @@ SOURCE_ID = re.compile(r'\d{1,12}', re.ASCII)
 CHECK = re.compile(r'[a-zA-Z0-9_ ]{1,80}', re.ASCII)
 FIELDS = {
     **dict.fromkeys(('count', 'errors', 'queued', 'rows', 'refs', 'reports', 'rosters', 'schedules',
-                    'retries', 'wait_ms', 'exit_code', 'http_status', 'os_errno', 'dropped',
+                    'retries', 'wait_ms', 'exit_code', 'signal_number', 'http_status', 'os_errno', 'dropped',
                     'sample_rows', 'assets', 'cache_hits', 'misses', 'requests'), int),
     **dict.fromkeys(('force', 'dirty', 'cached', 'stale', 'read_only', 'sample_limited'), bool),
     **dict.fromkeys(('cutoff', 'previous_cutoff', 'availability_date'), DATE),
@@ -108,9 +108,19 @@ def error_details(error: BaseException) -> dict:
     if isinstance(error, ValueError):
         return {'reason': 'validation_error'}
     if type(error).__module__ in ('_duckdb', 'duckdb'):
-        names = {'IOException': 'duckdb_io', 'ConstraintException': 'duckdb_constraint',
-                 'CatalogException': 'duckdb_catalog', 'BinderException': 'duckdb_binder'}
-        return {'reason': names.get(type(error).__name__, 'duckdb_error')}
+        name = type(error).__name__
+        if name == 'IOException':
+            message = str(error).lower()
+            if 'could not set lock' in message or 'conflicting lock' in message:
+                return {'reason': 'file_lock'}
+            if message.endswith('database does not exist') or 'no such file or directory' in message:
+                return {'reason': 'warehouse_file_missing'}
+            if 'permission denied' in message or 'operation not permitted' in message:
+                return {'reason': 'permission_denied'}
+            return {'reason': 'duckdb_io'}
+        names = {'ConstraintException': 'duckdb_constraint', 'CatalogException': 'duckdb_catalog',
+                 'BinderException': 'duckdb_binder'}
+        return {'reason': names.get(name, 'duckdb_error')}
     return {'reason': 'unexpected_error'}
 
 

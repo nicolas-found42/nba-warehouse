@@ -24,21 +24,24 @@ def parse_time(value: str) -> int:
         if stamp.utcoffset() is None:
             raise ValueError
         return (stamp - EPOCH) // dt.timedelta(microseconds=1)
-    except ValueError as error:
+    except (ValueError, OverflowError) as error:
         raise argparse.ArgumentTypeError('use ISO 8601 with an explicit offset') from error
 
 
 def inspect(args: argparse.Namespace) -> dict:
-    path = store_path(args.warehouse)
     result = {
         'schema_version': SCHEMA_VERSION,
-        'source': {'kind': 'local_operation_history', 'target_key': path.stem,
-                   'store_relative_to_warehouse_parent': 'observability/' + path.name},
+        'source': {'kind': 'local_operation_history'},
         'range': {'since_inclusive': timestamp(args.since), 'until_exclusive': timestamp(args.until)},
         'filters': {key: getattr(args, key) for key in ('workflow', 'run_id', 'game_id', 'cutoff')},
         'retention': {'days': RETENTION_DAYS, 'max_events': MAX_EVENTS, 'sampling': 'none in this store'},
         'events': [],
     }
+    try:
+        path = store_path(args.warehouse)
+    except (OSError, RuntimeError):
+        return result | {'query_status': 'inaccessible', 'coverage': 'unknown', 'query_error': 'target_unresolvable'}
+    result['source'].update(target_key=path.stem, store_relative_to_warehouse_parent='observability/' + path.name)
     try:
         with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=0.15)) as c:
             c.row_factory = sqlite3.Row
